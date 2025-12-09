@@ -113,17 +113,21 @@ int shell_execute(const char *cmdline)
 void shell_run(void)
 {
     char c;
+    volatile int delay;
 
     shell_prompt();
 
     while (1) {
-        /* Check for input */
-        if (!uart_haschar()) {
-            /* No interrupt support yet, just continue polling */
+        /* Wait for and get input character (non-blocking) */
+        c = uart_getchar();
+
+        /* If no character available, add delay and continue */
+        if (c == '\0') {
+            /* Add delay to reduce MMIO read frequency */
+            for (delay = 0; delay < 100000; delay++)
+                ;
             continue;
         }
-
-        c = uart_getchar();
 
         /* Handle special characters */
         if (c == '\r' || c == '\n') {

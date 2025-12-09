@@ -112,28 +112,27 @@ void uart_putc(char c)
 /* Check if character is available */
 int uart_haschar(void)
 {
-    /* Try direct read - if LSR DR bit is set, data is available */
-    volatile unsigned int lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);
-    return lsr & 0x01;
+    /* Always return 1 to avoid MMIO reads in polling loop.
+     * Let uart_getchar() handle the actual hardware check.
+     * This eliminates the performance bottleneck in QEMU. */
+    return 1;
 }
 
 /* Get character (blocking) */
 char uart_getchar(void)
 {
-    volatile int timeout;
+    volatile unsigned int lsr;
+    char ch;
 
-    /* Poll with timeout to avoid infinite loop */
-    while (1) {
-        volatile unsigned int lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);
-        if (lsr & 0x01) {
-            /* Data ready */
-            return uart_read_reg(BOARD_UART_BASE, UART_RBR) & 0xFF;
-        }
-
-        /* Small delay before retry */
-        for (timeout = 0; timeout < 10; timeout++)
-            ;
+    /* Check LSR once per call - no tight loop */
+    lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);
+    if (lsr & 0x01) {
+        /* Data ready - read it */
+        ch = uart_read_reg(BOARD_UART_BASE, UART_RBR) & 0xFF;
+        return ch;
     }
+    /* No data available - return null character */
+    return '\0';
 }
 
 /* Get character (non-blocking) */
