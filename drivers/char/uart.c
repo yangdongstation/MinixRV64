@@ -6,6 +6,10 @@
 #include <asm/io.h>
 #include <types.h>
 
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 /* Circular buffer structure */
 typedef struct {
     char data[UART_BUFFER_SIZE];
@@ -152,7 +156,7 @@ static int buffer_get(uart_buffer_t *buf, char *c)
     return 0;
 }
 
-static int buffer_peek(uart_buffer_t *buf)
+static int __attribute__((unused)) buffer_peek(uart_buffer_t *buf)
 {
     if (buf->count == 0) {
         return -1;
