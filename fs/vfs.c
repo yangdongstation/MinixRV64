@@ -232,15 +232,38 @@ static mount_point_t *vfs_find_mount(const char *path)
     return NULL;
 }
 
+/* Parse path component */
+static const char *parse_path_component(const char *path, char *component, int max_len)
+{
+    int i = 0;
+
+    /* Skip leading slashes */
+    while (*path == '/') {
+        path++;
+    }
+
+    /* Copy component until next slash or end */
+    while (*path && *path != '/' && i < max_len - 1) {
+        component[i++] = *path++;
+    }
+    component[i] = '\0';
+
+    return path;
+}
+
 /* Look up path in filesystem */
 inode_t *vfs_lookup_path(const char *path)
 {
     mount_point_t *mnt;
+    inode_t *current_inode;
+    char component[256];
+    const char *p;
 
-    if (path == NULL) {
+    if (path == NULL || *path == '\0') {
         return NULL;
     }
 
+    /* Find mount point for path */
     mnt = vfs_find_mount(path);
     if (mnt == NULL) {
         early_puts("VFS: Mount point not found for path: ");
@@ -249,12 +272,58 @@ inode_t *vfs_lookup_path(const char *path)
         return NULL;
     }
 
-    if (mnt->ops->lookup == NULL) {
+    /* Start from root inode of mount point */
+    current_inode = mnt->root;
+    if (current_inode == NULL) {
         return NULL;
     }
 
-    /* TODO: Handle relative path lookup */
-    return mnt->ops->lookup(mnt->root, path);
+    /* Skip mount point prefix */
+    p = path;
+    const char *mnt_path = mnt->path;
+    while (*mnt_path && *p && *mnt_path == *p) {
+        mnt_path++;
+        p++;
+    }
+
+    /* If path is just the mount point, return root inode */
+    if (*p == '\0' || (*p == '/' && *(p+1) == '\0')) {
+        return current_inode;
+    }
+
+    /* Parse and lookup each path component */
+    while (*p != '\0') {
+        p = parse_path_component(p, component, sizeof(component));
+
+        if (component[0] == '\0') {
+            break;  /* End of path */
+        }
+
+        /* Skip "." (current directory) */
+        if (component[0] == '.' && component[1] == '\0') {
+            continue;
+        }
+
+        /* Handle ".." (parent directory) */
+        if (component[0] == '.' && component[1] == '.' && component[2] == '\0') {
+            if (current_inode->parent) {
+                current_inode = current_inode->parent;
+            }
+            continue;
+        }
+
+        /* Lookup component in current directory */
+        if (mnt->ops->lookup == NULL) {
+            return NULL;
+        }
+
+        current_inode = mnt->ops->lookup(current_inode, component);
+        if (current_inode == NULL) {
+            return NULL;  /* Component not found */
+        }
+    }
+
+    return current_inode;
 }
 
 /* Open a file */

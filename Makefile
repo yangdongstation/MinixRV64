@@ -61,7 +61,9 @@ C_SRCS = $(ARCH_DIR)/kernel/main.c \
          $(FS_DIR)/fat32.c \
          $(FS_DIR)/ext2.c \
          $(FS_DIR)/ext3.c \
-         $(FS_DIR)/ext4.c
+         $(FS_DIR)/ext4.c \
+         $(FS_DIR)/devfs.c \
+         $(FS_DIR)/ramfs.c
 
 OBJS = $(ASM_SRCS:.S=.o) $(C_SRCS:.c=.o)
 
