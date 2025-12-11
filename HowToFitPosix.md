@@ -1509,80 +1509,1519 @@
   ---
   阶段5：文件系统完善（2-3个月）
 
+  ═══════════════════════════════════════════════════════════════
   任务5.1：完善VFS层（2周）
+  ═══════════════════════════════════════════════════════════════
 
-  /* fs/vfs.c - 增强版 */
+  当前状态：基本VFS框架已存在，需要增强以支持完整POSIX语义
+
+  核心数据结构升级：
+
+  /* include/minix/fs.h */
 
   struct file {
-      struct dentry *f_dentry;
-      struct file_operations *f_op;
-      atomic_t f_count;
-      unsigned int f_flags;
-      loff_t f_pos;
-      void *private_data;
+      struct dentry *f_dentry;        // 目录项
+      struct file_operations *f_op;   // 文件操作
+      atomic_t f_count;               // 引用计数
+      unsigned int f_flags;           // 打开标志 O_RDONLY等
+      fmode_t f_mode;                 // 访问模式
+      loff_t f_pos;                   // 当前位置
+      struct fown_struct f_owner;     // 异步I/O所有者
+      void *private_data;             // 文件系统私有数据
+      spinlock_t f_lock;              // 保护f_pos
   };
 
   struct dentry {
-      struct inode *d_inode;
-      struct dentry *d_parent;
-      struct qstr d_name;
-      struct list_head d_subdirs;
-      struct list_head d_child;
-      struct dentry_operations *d_op;
+      atomic_t d_count;               // 引用计数
+      unsigned int d_flags;           // dentry标志
+      struct inode *d_inode;          // 关联的inode
+      struct dentry *d_parent;        // 父目录
+      struct qstr d_name;             // 文件名
+      struct list_head d_lru;         // LRU链表
+      struct list_head d_child;       // 父目录的子项链表
+      struct list_head d_subdirs;     // 子目录链表
+      struct list_head d_alias;       // inode的别名链表
+      struct dentry_operations *d_op; // 操作函数
+      struct super_block *d_sb;       // 超级块
+      void *d_fsdata;                 // 文件系统私有数据
   };
 
   struct inode {
-      umode_t i_mode;
-      uid_t i_uid;
-      gid_t i_gid;
-      loff_t i_size;
-      struct timespec i_atime;
-      struct timespec i_mtime;
-      struct timespec i_ctime;
-      struct inode_operations *i_op;
-      struct file_operations *i_fop;
-      struct super_block *i_sb;
-      void *i_private;
+      umode_t i_mode;                 // 文件类型和权限
+      uid_t i_uid;                    // 所有者UID
+      gid_t i_gid;                    // 所有者GID
+      unsigned int i_flags;           // 文件系统标志
+      unsigned long i_ino;            // inode号
+      dev_t i_rdev;                   // 设备号（设备文件）
+      loff_t i_size;                  // 文件大小
+      struct timespec i_atime;        // 访问时间
+      struct timespec i_mtime;        // 修改时间
+      struct timespec i_ctime;        // 状态改变时间
+      unsigned int i_nlink;           // 硬链接数
+      blkcnt_t i_blocks;              // 占用块数
+      struct inode_operations *i_op;  // inode操作
+      struct file_operations *i_fop;  // 默认文件操作
+      struct super_block *i_sb;       // 超级块
+      struct address_space *i_mapping;// 页缓存映射
+      void *i_private;                // 文件系统私有数据
   };
 
-  // 路径查找缓存（dcache）
-  struct dentry *path_lookup(const char *pathname)
+  struct super_block {
+      dev_t s_dev;                    // 设备号
+      unsigned long s_blocksize;      // 块大小
+      unsigned char s_blocksize_bits; // 块大小位数
+      loff_t s_maxbytes;              // 最大文件大小
+      struct file_system_type *s_type;// 文件系统类型
+      struct super_operations *s_op;  // 超级块操作
+      struct dentry *s_root;          // 根目录dentry
+      int s_count;                    // 引用计数
+      void *s_fs_info;                // 文件系统私有数据
+      char s_id[32];                  // 文件系统名称
+  };
+
+  操作函数接口：
+
+  struct file_operations {
+      loff_t (*llseek)(struct file *, loff_t, int);
+      ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
+      ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
+      int (*readdir)(struct file *, struct dir_context *);
+      int (*open)(struct inode *, struct file *);
+      int (*release)(struct inode *, struct file *);
+      int (*fsync)(struct file *, loff_t, loff_t, int);
+      int (*mmap)(struct file *, struct vm_area_struct *);
+      long (*unlocked_ioctl)(struct file *, unsigned int, unsigned long);
+  };
+
+  struct inode_operations {
+      struct dentry *(*lookup)(struct inode *, struct dentry *, unsigned int);
+      int (*create)(struct inode *, struct dentry *, umode_t, bool);
+      int (*link)(struct dentry *, struct inode *, struct dentry *);
+      int (*unlink)(struct inode *, struct dentry *);
+      int (*symlink)(struct inode *, struct dentry *, const char *);
+      int (*mkdir)(struct inode *, struct dentry *, umode_t);
+      int (*rmdir)(struct inode *, struct dentry *);
+      int (*rename)(struct inode *, struct dentry *, struct inode *, struct dentry *);
+      int (*setattr)(struct dentry *, struct iattr *);
+      int (*getattr)(const struct path *, struct kstat *, unsigned int, unsigned int);
+  };
+
+  路径解析实现：
+
+  /* fs/namei.c */
+
+  // 路径解析核心函数
+  int path_lookup(const char *name, unsigned int flags, struct nameidata *nd)
   {
-      struct dentry *dentry = dcache_lookup(pathname);
-      if (dentry) return dentry;
+      int err;
 
-      // 缓存未命中，实际查找
-      dentry = do_path_lookup(pathname);
-      if (dentry) dcache_add(pathname, dentry);
+      // 1. 确定起点（绝对路径用根目录，相对路径用cwd）
+      if (*name == '/') {
+          nd->path.dentry = current->fs->root;
+          nd->path.mnt = current->fs->rootmnt;
+      } else {
+          nd->path.dentry = current->fs->pwd;
+          nd->path.mnt = current->fs->pwdmnt;
+      }
 
-      return dentry;
+      // 2. 逐级解析路径组件
+      while (*name) {
+          const char *next;
+          int len = get_next_component(name, &next);
+
+          if (len == 1 && name[0] == '.') {
+              // 当前目录，跳过
+          } else if (len == 2 && name[0] == '.' && name[1] == '.') {
+              // 父目录
+              err = follow_dotdot(nd);
+              if (err) return err;
+          } else {
+              // 普通组件，查找
+              err = do_lookup(nd, name, len);
+              if (err) return err;
+
+              // 检查是否是挂载点
+              if (d_mountpoint(nd->path.dentry))
+                  follow_mount(&nd->path);
+
+              // 检查是否是符号链接
+              if (nd->path.dentry->d_inode->i_op->follow_link)
+                  // 处理符号链接...
+          }
+
+          name = next;
+      }
+
+      return 0;
   }
 
-  任务5.2：实现ext2文件系统（4周）
-  任务5.3：实现块设备层（2周）
-  任务5.4：实现缓冲区缓存（buffer cache）（1周）
-  任务5.5：实现页缓存（page cache）（1周）
+  // Dentry缓存（dcache）
+  #define DCACHE_HASH_SIZE 256
+  static struct hlist_head dcache_hashtable[DCACHE_HASH_SIZE];
+  static spinlock_t dcache_lock;
+
+  struct dentry *d_lookup(struct dentry *parent, const struct qstr *name)
+  {
+      unsigned int hash = full_name_hash(parent, name->name, name->len);
+      struct hlist_head *head = &dcache_hashtable[hash % DCACHE_HASH_SIZE];
+      struct dentry *dentry;
+
+      spin_lock(&dcache_lock);
+      hlist_for_each_entry(dentry, head, d_hash) {
+          if (dentry->d_parent == parent &&
+              dentry->d_name.len == name->len &&
+              memcmp(dentry->d_name.name, name->name, name->len) == 0) {
+              dget(dentry);  // 增加引用计数
+              spin_unlock(&dcache_lock);
+              return dentry;
+          }
+      }
+      spin_unlock(&dcache_lock);
+      return NULL;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务5.2：实现块设备层（2周）
+  ═══════════════════════════════════════════════════════════════
+
+  /* include/minix/blkdev.h */
+
+  struct block_device {
+      dev_t bd_dev;                   // 设备号
+      struct inode *bd_inode;         // 块设备inode
+      struct super_block *bd_super;   // 如果已挂载
+      int bd_openers;                 // 打开计数
+      struct gendisk *bd_disk;        // 关联的磁盘
+      struct request_queue *bd_queue; // 请求队列
+      unsigned long bd_block_size;    // 块大小
+      loff_t bd_nr_sectors;           // 扇区数
+  };
+
+  struct gendisk {
+      int major;                      // 主设备号
+      int first_minor;                // 第一个次设备号
+      int minors;                     // 次设备号数量
+      char disk_name[32];             // 磁盘名称
+      struct block_device_operations *fops;
+      struct request_queue *queue;
+      void *private_data;
+      sector_t capacity;              // 容量（扇区数）
+  };
+
+  struct block_device_operations {
+      int (*open)(struct block_device *, fmode_t);
+      void (*release)(struct gendisk *, fmode_t);
+      int (*ioctl)(struct block_device *, fmode_t, unsigned, unsigned long);
+      int (*rw_page)(struct block_device *, sector_t, struct page *, bool);
+  };
+
+  // 块I/O请求
+  struct bio {
+      struct block_device *bi_bdev;   // 目标设备
+      sector_t bi_sector;             // 起始扇区
+      unsigned int bi_size;           // 数据大小
+      unsigned int bi_rw;             // 读/写标志
+      struct bio_vec *bi_io_vec;      // 数据向量
+      unsigned short bi_vcnt;         // 向量数量
+      void (*bi_end_io)(struct bio *);// 完成回调
+      void *bi_private;
+  };
+
+  struct bio_vec {
+      struct page *bv_page;           // 数据页
+      unsigned int bv_len;            // 长度
+      unsigned int bv_offset;         // 页内偏移
+  };
+
+  块I/O实现：
+
+  /* drivers/block/blkdev.c */
+
+  // 提交块I/O请求
+  void submit_bio(struct bio *bio)
+  {
+      struct block_device *bdev = bio->bi_bdev;
+      struct request_queue *q = bdev->bd_queue;
+
+      // 添加到请求队列
+      spin_lock(&q->queue_lock);
+      list_add_tail(&bio->bi_list, &q->bio_list);
+      spin_unlock(&q->queue_lock);
+
+      // 触发请求处理
+      q->request_fn(q);
+  }
+
+  // 同步读取块
+  int blkdev_read_block(struct block_device *bdev, sector_t sector,
+                        void *buf, size_t size)
+  {
+      struct bio bio;
+      struct bio_vec bvec;
+      struct page *page;
+
+      page = alloc_page(GFP_KERNEL);
+      if (!page) return -ENOMEM;
+
+      // 设置bio
+      bio.bi_bdev = bdev;
+      bio.bi_sector = sector;
+      bio.bi_size = size;
+      bio.bi_rw = READ;
+      bio.bi_vcnt = 1;
+      bio.bi_io_vec = &bvec;
+
+      bvec.bv_page = page;
+      bvec.bv_len = size;
+      bvec.bv_offset = 0;
+
+      // 提交并等待
+      submit_bio_wait(&bio);
+
+      // 复制数据
+      memcpy(buf, page_address(page), size);
+      free_page(page);
+
+      return 0;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务5.3：实现缓冲区缓存（Buffer Cache）（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  /* fs/buffer.c */
+
+  struct buffer_head {
+      unsigned long b_state;          // 缓冲区状态
+      struct buffer_head *b_this_page;// 同一页的下一个
+      struct page *b_page;            // 所属页
+      sector_t b_blocknr;             // 块号
+      size_t b_size;                  // 块大小
+      char *b_data;                   // 数据指针
+      struct block_device *b_bdev;    // 块设备
+      atomic_t b_count;               // 引用计数
+      spinlock_t b_lock;
+  };
+
+  // 缓冲区状态标志
+  enum bh_state_bits {
+      BH_Uptodate,    // 数据有效
+      BH_Dirty,       // 需要写回
+      BH_Lock,        // 正在I/O
+      BH_Mapped,      // 已映射到磁盘
+      BH_New,         // 新分配
+  };
+
+  // 获取块缓冲区
+  struct buffer_head *__bread(struct block_device *bdev,
+                               sector_t block, unsigned size)
+  {
+      struct buffer_head *bh;
+
+      // 1. 先在缓存中查找
+      bh = __find_get_block(bdev, block, size);
+      if (bh && buffer_uptodate(bh))
+          return bh;
+
+      // 2. 缓存未命中，分配新缓冲区
+      if (!bh) {
+          bh = __getblk(bdev, block, size);
+          if (!bh) return NULL;
+      }
+
+      // 3. 从磁盘读取
+      lock_buffer(bh);
+      if (!buffer_uptodate(bh)) {
+          bh->b_end_io = end_buffer_read_sync;
+          submit_bh(READ, bh);
+          wait_on_buffer(bh);
+      }
+
+      return bh;
+  }
+
+  // 标记脏并延迟写回
+  void mark_buffer_dirty(struct buffer_head *bh)
+  {
+      if (!test_set_buffer_dirty(bh)) {
+          // 添加到脏链表，等待pdflush回写
+          spin_lock(&buffer_dirty_lock);
+          list_add_tail(&bh->b_dirty_list, &buffer_dirty_list);
+          spin_unlock(&buffer_dirty_lock);
+      }
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务5.4：实现页缓存（Page Cache）（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  /* mm/filemap.c */
+
+  // address_space 管理文件的页缓存
+  struct address_space {
+      struct inode *host;             // 所属inode
+      struct radix_tree_root page_tree;// 页缓存树
+      spinlock_t tree_lock;
+      unsigned long nrpages;          // 缓存页数
+      const struct address_space_operations *a_ops;
+  };
+
+  struct address_space_operations {
+      int (*writepage)(struct page *, struct writeback_control *);
+      int (*readpage)(struct file *, struct page *);
+      int (*write_begin)(struct file *, struct address_space *,
+                         loff_t, unsigned, unsigned, struct page **, void **);
+      int (*write_end)(struct file *, struct address_space *,
+                       loff_t, unsigned, unsigned, struct page *, void *);
+  };
+
+  // 查找或创建页缓存页
+  struct page *find_or_create_page(struct address_space *mapping,
+                                    pgoff_t index, gfp_t gfp_mask)
+  {
+      struct page *page;
+
+      // 1. 先查找
+      spin_lock(&mapping->tree_lock);
+      page = radix_tree_lookup(&mapping->page_tree, index);
+      if (page) {
+          get_page(page);
+          spin_unlock(&mapping->tree_lock);
+          return page;
+      }
+      spin_unlock(&mapping->tree_lock);
+
+      // 2. 分配新页
+      page = alloc_page(gfp_mask);
+      if (!page) return NULL;
+
+      // 3. 插入缓存
+      spin_lock(&mapping->tree_lock);
+      if (radix_tree_insert(&mapping->page_tree, index, page) == 0) {
+          page->mapping = mapping;
+          page->index = index;
+          mapping->nrpages++;
+      } else {
+          // 竞争失败，释放页
+          free_page(page);
+          page = radix_tree_lookup(&mapping->page_tree, index);
+          get_page(page);
+      }
+      spin_unlock(&mapping->tree_lock);
+
+      return page;
+  }
+
+  // 通用文件读取（使用页缓存）
+  ssize_t generic_file_read(struct file *filp, char __user *buf,
+                            size_t count, loff_t *ppos)
+  {
+      struct address_space *mapping = filp->f_mapping;
+      struct inode *inode = mapping->host;
+      pgoff_t index;
+      unsigned long offset;
+      ssize_t ret = 0;
+
+      while (count > 0) {
+          index = *ppos >> PAGE_SHIFT;
+          offset = *ppos & ~PAGE_MASK;
+
+          struct page *page = find_or_create_page(mapping, index, GFP_KERNEL);
+          if (!page) return -ENOMEM;
+
+          // 如果页不是最新的，从磁盘读取
+          if (!PageUptodate(page)) {
+              int err = mapping->a_ops->readpage(filp, page);
+              if (err) {
+                  put_page(page);
+                  return err;
+              }
+          }
+
+          // 复制到用户空间
+          size_t bytes = min(count, PAGE_SIZE - offset);
+          if (copy_to_user(buf, page_address(page) + offset, bytes)) {
+              put_page(page);
+              return -EFAULT;
+          }
+
+          put_page(page);
+          buf += bytes;
+          count -= bytes;
+          *ppos += bytes;
+          ret += bytes;
+      }
+
+      return ret;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务5.5：实现 ext2 文件系统（4周）
+  ═══════════════════════════════════════════════════════════════
+
+  ext2 磁盘布局：
+
+  ┌──────────┬───────────┬───────────┬───────────┬───────────┬─────────┐
+  │ Boot     │ Super     │ Group     │ Block     │ Inode     │ Data    │
+  │ Block    │ Block     │ Desc      │ Bitmap    │ Bitmap    │ Blocks  │
+  │ (1024B)  │           │ Table     │           │           │         │
+  └──────────┴───────────┴───────────┴───────────┴───────────┴─────────┘
+       0          1           2           3           4         5...
+
+  /* fs/ext2/ext2.h */
+
+  // 超级块（磁盘上）
+  struct ext2_super_block {
+      __le32 s_inodes_count;          // inode总数
+      __le32 s_blocks_count;          // 块总数
+      __le32 s_r_blocks_count;        // 保留块数
+      __le32 s_free_blocks_count;     // 空闲块数
+      __le32 s_free_inodes_count;     // 空闲inode数
+      __le32 s_first_data_block;      // 第一个数据块
+      __le32 s_log_block_size;        // 块大小 = 1024 << s_log_block_size
+      __le32 s_blocks_per_group;      // 每组块数
+      __le32 s_inodes_per_group;      // 每组inode数
+      __le32 s_mtime;                 // 最后挂载时间
+      __le32 s_wtime;                 // 最后写入时间
+      __le16 s_mnt_count;             // 挂载次数
+      __le16 s_max_mnt_count;         // 最大挂载次数
+      __le16 s_magic;                 // 魔数 0xEF53
+      __le16 s_state;                 // 文件系统状态
+      __le16 s_errors;                // 错误处理方式
+      __le32 s_first_ino;             // 第一个非保留inode
+      __le16 s_inode_size;            // inode大小
+      // ... 更多字段
+  };
+
+  // 块组描述符
+  struct ext2_group_desc {
+      __le32 bg_block_bitmap;         // 块位图块号
+      __le32 bg_inode_bitmap;         // inode位图块号
+      __le32 bg_inode_table;          // inode表起始块号
+      __le16 bg_free_blocks_count;    // 空闲块数
+      __le16 bg_free_inodes_count;    // 空闲inode数
+      __le16 bg_used_dirs_count;      // 目录数
+      __le16 bg_pad;
+      __le32 bg_reserved[3];
+  };
+
+  // inode（磁盘上）
+  struct ext2_inode {
+      __le16 i_mode;                  // 文件类型和权限
+      __le16 i_uid;                   // 所有者UID
+      __le32 i_size;                  // 文件大小
+      __le32 i_atime;                 // 访问时间
+      __le32 i_ctime;                 // 创建时间
+      __le32 i_mtime;                 // 修改时间
+      __le32 i_dtime;                 // 删除时间
+      __le16 i_gid;                   // 所有者GID
+      __le16 i_links_count;           // 硬链接数
+      __le32 i_blocks;                // 占用块数（512字节单位）
+      __le32 i_flags;                 // 文件标志
+      __le32 i_block[15];             // 块指针
+      // i_block[0-11]  : 直接块
+      // i_block[12]    : 一级间接块
+      // i_block[13]    : 二级间接块
+      // i_block[14]    : 三级间接块
+      // ... 更多字段
+  };
+
+  // 目录项
+  struct ext2_dir_entry_2 {
+      __le32 inode;                   // inode号
+      __le16 rec_len;                 // 目录项长度
+      __u8   name_len;                // 文件名长度
+      __u8   file_type;               // 文件类型
+      char   name[];                  // 文件名（可变长）
+  };
+
+  ext2 核心操作实现：
+
+  /* fs/ext2/inode.c */
+
+  // 读取磁盘inode
+  struct inode *ext2_iget(struct super_block *sb, unsigned long ino)
+  {
+      struct ext2_sb_info *sbi = sb->s_fs_info;
+      struct buffer_head *bh;
+      struct ext2_inode *raw_inode;
+      struct inode *inode;
+      unsigned long block_group, block, offset;
+
+      // 计算inode所在位置
+      block_group = (ino - 1) / sbi->s_inodes_per_group;
+      offset = (ino - 1) % sbi->s_inodes_per_group;
+
+      struct ext2_group_desc *gdp = ext2_get_group_desc(sb, block_group);
+      block = gdp->bg_inode_table +
+              (offset * sbi->s_inode_size) / sb->s_blocksize;
+
+      // 读取inode块
+      bh = sb_bread(sb, block);
+      if (!bh) return ERR_PTR(-EIO);
+
+      raw_inode = (struct ext2_inode *)
+                  (bh->b_data + (offset % inodes_per_block) * sbi->s_inode_size);
+
+      // 分配VFS inode并填充
+      inode = new_inode(sb);
+      inode->i_ino = ino;
+      inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+      inode->i_uid = le16_to_cpu(raw_inode->i_uid);
+      inode->i_gid = le16_to_cpu(raw_inode->i_gid);
+      inode->i_size = le32_to_cpu(raw_inode->i_size);
+      inode->i_nlink = le16_to_cpu(raw_inode->i_links_count);
+
+      // 设置操作函数
+      if (S_ISREG(inode->i_mode)) {
+          inode->i_op = &ext2_file_inode_operations;
+          inode->i_fop = &ext2_file_operations;
+      } else if (S_ISDIR(inode->i_mode)) {
+          inode->i_op = &ext2_dir_inode_operations;
+          inode->i_fop = &ext2_dir_operations;
+      } else if (S_ISLNK(inode->i_mode)) {
+          inode->i_op = &ext2_symlink_inode_operations;
+      }
+
+      brelse(bh);
+      return inode;
+  }
+
+  // 获取文件块号（处理间接块）
+  static int ext2_get_block(struct inode *inode, sector_t iblock,
+                            struct buffer_head *bh_result, int create)
+  {
+      struct ext2_inode_info *ei = EXT2_I(inode);
+      int ptrs = EXT2_ADDR_PER_BLOCK(inode->i_sb);
+      int ptrs_bits = EXT2_ADDR_PER_BLOCK_BITS(inode->i_sb);
+      const int direct_blocks = EXT2_NDIR_BLOCKS;
+      const int indirect_blocks = ptrs;
+      const int double_blocks = ptrs * ptrs;
+
+      if (iblock < direct_blocks) {
+          // 直接块
+          map_bh(bh_result, inode->i_sb, ei->i_data[iblock]);
+      } else if (iblock < direct_blocks + indirect_blocks) {
+          // 一级间接块
+          iblock -= direct_blocks;
+          ext2_get_branch(inode, 1, &ei->i_data[EXT2_IND_BLOCK],
+                          iblock, bh_result, create);
+      } else if (iblock < direct_blocks + indirect_blocks + double_blocks) {
+          // 二级间接块
+          iblock -= direct_blocks + indirect_blocks;
+          ext2_get_branch(inode, 2, &ei->i_data[EXT2_DIND_BLOCK],
+                          iblock, bh_result, create);
+      } else {
+          // 三级间接块
+          iblock -= direct_blocks + indirect_blocks + double_blocks;
+          ext2_get_branch(inode, 3, &ei->i_data[EXT2_TIND_BLOCK],
+                          iblock, bh_result, create);
+      }
+
+      return 0;
+  }
+
+  /* fs/ext2/dir.c */
+
+  // 目录查找
+  struct dentry *ext2_lookup(struct inode *dir, struct dentry *dentry,
+                              unsigned int flags)
+  {
+      struct inode *inode = NULL;
+      ino_t ino;
+
+      // 在目录中查找文件名
+      ino = ext2_inode_by_name(dir, &dentry->d_name);
+      if (ino) {
+          inode = ext2_iget(dir->i_sb, ino);
+          if (IS_ERR(inode))
+              return ERR_CAST(inode);
+      }
+
+      return d_splice_alias(inode, dentry);
+  }
+
+  // 在目录中查找inode号
+  ino_t ext2_inode_by_name(struct inode *dir, const struct qstr *name)
+  {
+      struct ext2_dir_entry_2 *de;
+      struct buffer_head *bh;
+      int namelen = name->len;
+      const char *fname = name->name;
+      loff_t pos = 0;
+
+      while (pos < dir->i_size) {
+          bh = ext2_bread(dir, pos >> dir->i_sb->s_blocksize_bits);
+          if (!bh) return 0;
+
+          de = (struct ext2_dir_entry_2 *)bh->b_data;
+          while ((char *)de < bh->b_data + bh->b_size) {
+              if (de->inode && de->name_len == namelen &&
+                  memcmp(de->name, fname, namelen) == 0) {
+                  ino_t ino = le32_to_cpu(de->inode);
+                  brelse(bh);
+                  return ino;
+              }
+              de = (void *)de + le16_to_cpu(de->rec_len);
+          }
+          brelse(bh);
+          pos += bh->b_size;
+      }
+
+      return 0;  // 未找到
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务5.6：实现 procfs（选做，1周）
+  ═══════════════════════════════════════════════════════════════
+
+  procfs 提供进程和系统信息的伪文件系统：
+
+  /proc/
+  ├── [pid]/
+  │   ├── status      # 进程状态
+  │   ├── cmdline     # 命令行
+  │   ├── maps        # 内存映射
+  │   ├── fd/         # 打开的文件描述符
+  │   └── stat        # 进程统计
+  ├── cpuinfo         # CPU信息
+  ├── meminfo         # 内存信息
+  ├── uptime          # 运行时间
+  ├── version         # 内核版本
+  └── mounts          # 挂载信息
+
+  /* fs/proc/base.c */
+
+  static ssize_t proc_pid_status_read(struct file *file, char __user *buf,
+                                       size_t count, loff_t *ppos)
+  {
+      struct task_struct *task = get_proc_task(file->f_path.dentry->d_inode);
+      char buffer[256];
+      int len;
+
+      len = snprintf(buffer, sizeof(buffer),
+          "Name:\t%s\n"
+          "State:\t%c\n"
+          "Pid:\t%d\n"
+          "PPid:\t%d\n"
+          "Uid:\t%d\n"
+          "Gid:\t%d\n",
+          task->comm,
+          task_state_char(task),
+          task->pid,
+          task->parent ? task->parent->pid : 0,
+          task->uid,
+          task->gid);
+
+      return simple_read_from_buffer(buf, count, ppos, buffer, len);
+  }
 
   阶段5验收标准：
-  - ⬜ VFS层功能完善
-  - ⬜ ext2文件系统能正常读写
-  - ⬜ 块设备层工作正常
-  - ⬜ 缓存机制提高I/O性能
+  - ⬜ VFS 层支持完整的路径解析和 dcache
+  - ⬜ 块设备层能正确处理 I/O 请求
+  - ⬜ 缓冲区缓存减少磁盘访问
+  - ⬜ 页缓存加速文件读写
+  - ⬜ ext2 文件系统能正常挂载和读写
+  - ⬜ 能在 ext2 分区上创建/删除文件和目录
 
   ---
   阶段6：高级特性与测试（2-4个月）
 
+  ═══════════════════════════════════════════════════════════════
   任务6.1：实现信号机制（3周）
-  任务6.2：实现管道（pipe）（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  信号是 Unix 进程间通信的基础，musl 程序需要信号支持。
+
+  信号列表（POSIX 必需）：
+
+  #define SIGHUP      1   // 挂起
+  #define SIGINT      2   // 中断 (Ctrl+C)
+  #define SIGQUIT     3   // 退出 (Ctrl+\)
+  #define SIGILL      4   // 非法指令
+  #define SIGTRAP     5   // 断点
+  #define SIGABRT     6   // abort()
+  #define SIGBUS      7   // 总线错误
+  #define SIGFPE      8   // 浮点异常
+  #define SIGKILL     9   // 强制终止（不可捕获）
+  #define SIGUSR1    10   // 用户定义1
+  #define SIGSEGV    11   // 段错误
+  #define SIGUSR2    12   // 用户定义2
+  #define SIGPIPE    13   // 管道破裂
+  #define SIGALRM    14   // 定时器
+  #define SIGTERM    15   // 终止
+  #define SIGCHLD    17   // 子进程状态改变
+  #define SIGCONT    18   // 继续执行
+  #define SIGSTOP    19   // 停止（不可捕获）
+  #define SIGTSTP    20   // 终端停止 (Ctrl+Z)
+
+  核心数据结构：
+
+  /* include/minix/signal.h */
+
+  typedef void (*sighandler_t)(int);
+  typedef unsigned long sigset_t;
+
+  struct sigaction {
+      union {
+          sighandler_t sa_handler;    // 简单处理函数
+          void (*sa_sigaction)(int, siginfo_t *, void *);  // 带信息的处理
+      };
+      sigset_t sa_mask;               // 执行时阻塞的信号
+      int sa_flags;                   // SA_SIGINFO, SA_RESTART 等
+      void (*sa_restorer)(void);      // 信号返回 trampoline
+  };
+
+  struct sigpending {
+      struct list_head list;          // 待处理信号链表
+      sigset_t signal;                // 待处理信号位图
+  };
+
+  // 每个进程的信号状态
+  struct signal_struct {
+      atomic_t count;                 // 引用计数
+      struct sigpending shared_pending;// 共享待处理信号
+      struct k_sigaction action[64];  // 信号处理动作
+  };
+
+  // 内核态信号动作
+  struct k_sigaction {
+      struct sigaction sa;
+  };
+
+  信号发送实现：
+
+  /* kernel/signal.c */
+
+  // 发送信号给进程
+  int send_signal(int sig, struct task_struct *t)
+  {
+      struct sigpending *pending;
+      struct sigqueue *q;
+
+      // 1. 检查信号是否被忽略
+      if (sig_ignored(t, sig))
+          return 0;
+
+      // 2. 检查信号是否被阻塞（除了 SIGKILL/SIGSTOP）
+      if (sigismember(&t->blocked, sig) && sig != SIGKILL && sig != SIGSTOP) {
+          // 添加到待处理队列
+          pending = &t->pending;
+      } else {
+          pending = &t->signal->shared_pending;
+      }
+
+      // 3. 添加到待处理信号集
+      sigaddset(&pending->signal, sig);
+
+      // 4. 如果进程在睡眠，唤醒它
+      if (t->state == TASK_INTERRUPTIBLE)
+          wake_up_process(t);
+
+      // 5. 设置 TIF_SIGPENDING 标志
+      set_tsk_thread_flag(t, TIF_SIGPENDING);
+
+      return 0;
+  }
+
+  // sys_kill 实现
+  SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
+  {
+      struct task_struct *p;
+
+      if (sig < 0 || sig > 64)
+          return -EINVAL;
+
+      if (pid > 0) {
+          // 发送给指定进程
+          p = find_task_by_pid(pid);
+          if (!p) return -ESRCH;
+          return send_signal(sig, p);
+      } else if (pid == 0) {
+          // 发送给同进程组
+          return kill_pgrp(current->pgrp, sig);
+      } else if (pid == -1) {
+          // 发送给所有进程
+          return kill_all(sig);
+      } else {
+          // 发送给指定进程组
+          return kill_pgrp(-pid, sig);
+      }
+  }
+
+  信号处理实现：
+
+  /* arch/riscv64/kernel/signal.c */
+
+  // 信号栈帧（用户态栈上）
+  struct rt_sigframe {
+      struct siginfo info;            // 信号信息
+      struct ucontext uc;             // 用户上下文
+      // sigreturn trampoline 代码
+  };
+
+  struct ucontext {
+      unsigned long uc_flags;
+      struct ucontext *uc_link;
+      stack_t uc_stack;               // 信号栈
+      sigset_t uc_sigmask;            // 保存的信号掩码
+      struct sigcontext uc_mcontext;  // 保存的寄存器
+  };
+
+  struct sigcontext {
+      unsigned long sc_regs[32];      // 通用寄存器
+      unsigned long sc_pc;            // 程序计数器
+      // 浮点寄存器...
+  };
+
+  // 在返回用户态前检查待处理信号
+  void do_signal(struct pt_regs *regs)
+  {
+      struct ksignal ksig;
+
+      // 获取下一个待处理信号
+      if (!get_signal(&ksig))
+          return;
+
+      // 处理信号
+      handle_signal(&ksig, regs);
+  }
+
+  // 设置信号处理栈帧
+  static int setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
+  {
+      struct rt_sigframe __user *frame;
+      unsigned long sp = regs->sp;
+
+      // 1. 在用户栈上分配信号帧
+      sp -= sizeof(*frame);
+      sp &= ~15;  // 16字节对齐
+      frame = (struct rt_sigframe __user *)sp;
+
+      // 2. 保存当前上下文
+      if (copy_siginfo_to_user(&frame->info, &ksig->info))
+          return -EFAULT;
+
+      // 保存寄存器到 uc_mcontext
+      for (int i = 0; i < 32; i++)
+          frame->uc.uc_mcontext.sc_regs[i] = regs->regs[i];
+      frame->uc.uc_mcontext.sc_pc = regs->sepc;
+
+      // 3. 设置 sigreturn trampoline
+      // 用户态执行完信号处理函数后会调用 rt_sigreturn
+      frame->uc.uc_mcontext.sc_regs[1] = (unsigned long)&frame->retcode;
+      // retcode: li a7, __NR_rt_sigreturn; ecall
+
+      // 4. 修改寄存器，跳转到信号处理函数
+      regs->sepc = (unsigned long)ksig->ka.sa.sa_handler;
+      regs->sp = (unsigned long)frame;
+      regs->regs[10] = ksig->sig;  // a0 = 信号号
+
+      if (ksig->ka.sa.sa_flags & SA_SIGINFO) {
+          regs->regs[11] = (unsigned long)&frame->info;     // a1 = siginfo
+          regs->regs[12] = (unsigned long)&frame->uc;       // a2 = ucontext
+      }
+
+      return 0;
+  }
+
+  // 信号返回系统调用
+  SYSCALL_DEFINE0(rt_sigreturn)
+  {
+      struct pt_regs *regs = current_pt_regs();
+      struct rt_sigframe __user *frame;
+
+      frame = (struct rt_sigframe __user *)(regs->sp);
+
+      // 恢复信号掩码
+      sigset_t set;
+      if (copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
+          return -EFAULT;
+      set_current_blocked(&set);
+
+      // 恢复寄存器
+      for (int i = 0; i < 32; i++)
+          regs->regs[i] = frame->uc.uc_mcontext.sc_regs[i];
+      regs->sepc = frame->uc.uc_mcontext.sc_pc;
+
+      return regs->regs[10];  // 返回 a0
+  }
+
+  sigaction 系统调用：
+
+  SYSCALL_DEFINE4(rt_sigaction, int, sig,
+                  const struct sigaction __user *, act,
+                  struct sigaction __user *, oact,
+                  size_t, sigsetsize)
+  {
+      struct k_sigaction new_ka, old_ka;
+
+      if (sig < 1 || sig > 64)
+          return -EINVAL;
+
+      // 不能改变 SIGKILL 和 SIGSTOP 的处理
+      if (sig == SIGKILL || sig == SIGSTOP)
+          return -EINVAL;
+
+      // 保存旧动作
+      if (oact) {
+          old_ka = current->sighand->action[sig - 1];
+          if (copy_to_user(oact, &old_ka.sa, sizeof(*oact)))
+              return -EFAULT;
+      }
+
+      // 设置新动作
+      if (act) {
+          if (copy_from_user(&new_ka.sa, act, sizeof(*act)))
+              return -EFAULT;
+          current->sighand->action[sig - 1] = new_ka;
+      }
+
+      return 0;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务6.2：实现管道（Pipe）（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  管道是最基本的 IPC 机制。
+
+  /* fs/pipe.c */
+
+  #define PIPE_BUF_SIZE   4096    // POSIX 最小保证原子写入大小
+
+  struct pipe_inode_info {
+      struct mutex mutex;             // 保护管道
+      wait_queue_head_t wait;         // 等待队列
+      unsigned int head;              // 读位置
+      unsigned int tail;              // 写位置
+      unsigned int readers;           // 读端计数
+      unsigned int writers;           // 写端计数
+      struct page *bufs;              // 数据缓冲区
+  };
+
+  // 创建管道
+  SYSCALL_DEFINE2(pipe2, int __user *, fildes, int, flags)
+  {
+      struct file *files[2];
+      int fd[2];
+      int err;
+
+      // 1. 分配管道 inode
+      struct inode *inode = get_pipe_inode();
+      if (!inode) return -ENFILE;
+
+      struct pipe_inode_info *pipe = inode->i_pipe;
+
+      // 2. 创建读端文件
+      files[0] = alloc_file(FMODE_READ);
+      files[0]->f_op = &read_pipefifo_fops;
+      files[0]->private_data = pipe;
+      pipe->readers++;
+
+      // 3. 创建写端文件
+      files[1] = alloc_file(FMODE_WRITE);
+      files[1]->f_op = &write_pipefifo_fops;
+      files[1]->private_data = pipe;
+      pipe->writers++;
+
+      // 4. 分配文件描述符
+      fd[0] = get_unused_fd_flags(flags);
+      fd[1] = get_unused_fd_flags(flags);
+
+      fd_install(fd[0], files[0]);
+      fd_install(fd[1], files[1]);
+
+      // 5. 返回给用户
+      if (copy_to_user(fildes, fd, sizeof(fd)))
+          return -EFAULT;
+
+      return 0;
+  }
+
+  // 管道读取
+  static ssize_t pipe_read(struct file *filp, char __user *buf,
+                           size_t count, loff_t *ppos)
+  {
+      struct pipe_inode_info *pipe = filp->private_data;
+      ssize_t ret = 0;
+
+      mutex_lock(&pipe->mutex);
+
+      while (count > 0) {
+          // 检查是否有数据
+          unsigned int head = pipe->head;
+          unsigned int tail = pipe->tail;
+
+          if (head == tail) {
+              // 管道为空
+              if (pipe->writers == 0) {
+                  // 写端已关闭，返回 EOF
+                  break;
+              }
+              if (filp->f_flags & O_NONBLOCK) {
+                  ret = ret ? ret : -EAGAIN;
+                  break;
+              }
+              // 等待数据
+              mutex_unlock(&pipe->mutex);
+              wait_event_interruptible(pipe->wait, pipe->head != pipe->tail);
+              mutex_lock(&pipe->mutex);
+              continue;
+          }
+
+          // 读取数据
+          size_t available = tail - head;
+          size_t to_read = min(count, available);
+
+          char *src = page_address(pipe->bufs) + (head % PIPE_BUF_SIZE);
+          if (copy_to_user(buf, src, to_read)) {
+              ret = -EFAULT;
+              break;
+          }
+
+          pipe->head += to_read;
+          buf += to_read;
+          count -= to_read;
+          ret += to_read;
+
+          // 唤醒写者
+          wake_up_interruptible(&pipe->wait);
+      }
+
+      mutex_unlock(&pipe->mutex);
+      return ret;
+  }
+
+  // 管道写入
+  static ssize_t pipe_write(struct file *filp, const char __user *buf,
+                            size_t count, loff_t *ppos)
+  {
+      struct pipe_inode_info *pipe = filp->private_data;
+      ssize_t ret = 0;
+
+      mutex_lock(&pipe->mutex);
+
+      // 检查读端是否已关闭
+      if (pipe->readers == 0) {
+          send_signal(SIGPIPE, current);
+          ret = -EPIPE;
+          goto out;
+      }
+
+      while (count > 0) {
+          unsigned int head = pipe->head;
+          unsigned int tail = pipe->tail;
+          unsigned int space = PIPE_BUF_SIZE - (tail - head);
+
+          if (space == 0) {
+              // 管道满
+              if (filp->f_flags & O_NONBLOCK) {
+                  ret = ret ? ret : -EAGAIN;
+                  break;
+              }
+              // 等待空间
+              mutex_unlock(&pipe->mutex);
+              wait_event_interruptible(pipe->wait,
+                  PIPE_BUF_SIZE - (pipe->tail - pipe->head) > 0);
+              mutex_lock(&pipe->mutex);
+              continue;
+          }
+
+          // 写入数据
+          size_t to_write = min(count, space);
+          char *dst = page_address(pipe->bufs) + (tail % PIPE_BUF_SIZE);
+
+          if (copy_from_user(dst, buf, to_write)) {
+              ret = -EFAULT;
+              break;
+          }
+
+          pipe->tail += to_write;
+          buf += to_write;
+          count -= to_write;
+          ret += to_write;
+
+          // 唤醒读者
+          wake_up_interruptible(&pipe->wait);
+      }
+
+  out:
+      mutex_unlock(&pipe->mutex);
+      return ret;
+  }
+
+  ═══════════════════════════════════════════════════════════════
   任务6.3：实现设备驱动框架（2周）
-  任务6.4：网络栈基础（选做，4周+）
+  ═══════════════════════════════════════════════════════════════
+
+  字符设备框架：
+
+  /* include/minix/cdev.h */
+
+  struct cdev {
+      struct kobject kobj;
+      struct module *owner;
+      const struct file_operations *ops;
+      struct list_head list;
+      dev_t dev;                      // 设备号
+      unsigned int count;             // 次设备号数量
+  };
+
+  // 字符设备注册表
+  #define MAX_CHRDEV  256
+  static struct char_device_struct {
+      struct char_device_struct *next;
+      unsigned int major;
+      unsigned int baseminor;
+      int minorct;
+      char name[64];
+      struct cdev *cdev;
+  } *chrdevs[MAX_CHRDEV];
+
+  // 注册字符设备
+  int register_chrdev_region(dev_t from, unsigned count, const char *name)
+  {
+      unsigned int major = MAJOR(from);
+      unsigned int minor = MINOR(from);
+
+      struct char_device_struct *cd = kmalloc(sizeof(*cd), GFP_KERNEL);
+      cd->major = major;
+      cd->baseminor = minor;
+      cd->minorct = count;
+      strncpy(cd->name, name, sizeof(cd->name));
+
+      // 添加到哈希表
+      cd->next = chrdevs[major % MAX_CHRDEV];
+      chrdevs[major % MAX_CHRDEV] = cd;
+
+      return 0;
+  }
+
+  // 初始化 cdev
+  void cdev_init(struct cdev *cdev, const struct file_operations *fops)
+  {
+      memset(cdev, 0, sizeof(*cdev));
+      INIT_LIST_HEAD(&cdev->list);
+      cdev->ops = fops;
+  }
+
+  // 添加 cdev
+  int cdev_add(struct cdev *p, dev_t dev, unsigned count)
+  {
+      p->dev = dev;
+      p->count = count;
+
+      // 关联到注册表
+      unsigned int major = MAJOR(dev);
+      struct char_device_struct *cd = chrdevs[major % MAX_CHRDEV];
+      while (cd && cd->major != major)
+          cd = cd->next;
+
+      if (cd)
+          cd->cdev = p;
+
+      return 0;
+  }
+
+  // 打开字符设备
+  static int chrdev_open(struct inode *inode, struct file *filp)
+  {
+      struct cdev *p;
+      dev_t dev = inode->i_rdev;
+
+      // 查找 cdev
+      p = lookup_cdev(dev);
+      if (!p) return -ENXIO;
+
+      // 设置文件操作
+      filp->f_op = p->ops;
+
+      // 调用设备的 open
+      if (filp->f_op->open)
+          return filp->f_op->open(inode, filp);
+
+      return 0;
+  }
+
+  示例：TTY 设备驱动
+
+  /* drivers/char/tty.c */
+
+  static struct tty_struct *ttys[MAX_TTYS];
+
+  static int tty_open(struct inode *inode, struct file *filp)
+  {
+      int minor = MINOR(inode->i_rdev);
+      struct tty_struct *tty = ttys[minor];
+
+      if (!tty)
+          return -ENODEV;
+
+      filp->private_data = tty;
+      tty->count++;
+
+      return 0;
+  }
+
+  static ssize_t tty_read(struct file *filp, char __user *buf,
+                          size_t count, loff_t *ppos)
+  {
+      struct tty_struct *tty = filp->private_data;
+      return tty->ldisc->ops->read(tty, filp, buf, count);
+  }
+
+  static ssize_t tty_write(struct file *filp, const char __user *buf,
+                           size_t count, loff_t *ppos)
+  {
+      struct tty_struct *tty = filp->private_data;
+      return tty->ldisc->ops->write(tty, filp, buf, count);
+  }
+
+  static long tty_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+  {
+      struct tty_struct *tty = filp->private_data;
+
+      switch (cmd) {
+      case TCGETS:
+          return copy_to_user((void *)arg, &tty->termios, sizeof(tty->termios));
+      case TCSETS:
+          return copy_from_user(&tty->termios, (void *)arg, sizeof(tty->termios));
+      case TIOCGWINSZ:
+          return copy_to_user((void *)arg, &tty->winsize, sizeof(tty->winsize));
+      case TIOCSWINSZ:
+          return copy_from_user(&tty->winsize, (void *)arg, sizeof(tty->winsize));
+      default:
+          return -ENOTTY;
+      }
+  }
+
+  static const struct file_operations tty_fops = {
+      .open = tty_open,
+      .read = tty_read,
+      .write = tty_write,
+      .unlocked_ioctl = tty_ioctl,
+      .release = tty_release,
+  };
+
+  ═══════════════════════════════════════════════════════════════
+  任务6.4：实现 dup/dup2（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  /* fs/fcntl.c */
+
+  // 复制文件描述符
+  SYSCALL_DEFINE1(dup, unsigned int, fildes)
+  {
+      struct file *file = fget(fildes);
+      if (!file) return -EBADF;
+
+      int newfd = get_unused_fd_flags(0);
+      if (newfd < 0) {
+          fput(file);
+          return newfd;
+      }
+
+      fd_install(newfd, file);
+      return newfd;
+  }
+
+  // 复制到指定描述符
+  SYSCALL_DEFINE3(dup3, unsigned int, oldfd, unsigned int, newfd, int, flags)
+  {
+      struct file *file;
+
+      if (oldfd == newfd)
+          return -EINVAL;
+
+      file = fget(oldfd);
+      if (!file) return -EBADF;
+
+      // 如果 newfd 已打开，先关闭
+      struct file *old_file = fget(newfd);
+      if (old_file) {
+          fput(old_file);
+          sys_close(newfd);
+      }
+
+      // 确保 newfd 可用
+      int err = expand_files(current->files, newfd);
+      if (err < 0) {
+          fput(file);
+          return err;
+      }
+
+      // 安装新文件描述符
+      fd_install(newfd, file);
+
+      if (flags & O_CLOEXEC)
+          set_close_on_exec(newfd, 1);
+
+      return newfd;
+  }
+
+  SYSCALL_DEFINE2(dup2, unsigned int, oldfd, unsigned int, newfd)
+  {
+      if (oldfd == newfd) {
+          // POSIX: 如果相同，检查 oldfd 是否有效
+          if (fget(oldfd))
+              return newfd;
+          return -EBADF;
+      }
+      return sys_dup3(oldfd, newfd, 0);
+  }
+
+  ═══════════════════════════════════════════════════════════════
   任务6.5：测试套件（持续）
+  ═══════════════════════════════════════════════════════════════
+
+  测试策略：
+
+  1. 单元测试 - 每个子系统独立测试
+  ┌─────────────────────────────────────────────────────────────┐
+  │  测试文件           │  测试内容                             │
+  │ ─────────────────── │ ───────────────────────────────────── │
+  │  test_slab.c        │  kmalloc/kfree 正确性                 │
+  │  test_buddy.c       │  页分配器功能                         │
+  │  test_vfs.c         │  路径解析、文件操作                   │
+  │  test_signal.c      │  信号发送/接收/处理                   │
+  │  test_pipe.c        │  管道读写、阻塞行为                   │
+  │  test_fork.c        │  进程创建、内存复制                   │
+  └─────────────────────────────────────────────────────────────┘
+
+  2. 系统测试 - 用户态程序测试
+
+  /* userspace/test_posix.c */
+
+  #include <stdio.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include <unistd.h>
+  #include <fcntl.h>
+  #include <signal.h>
+  #include <sys/wait.h>
+  #include <sys/stat.h>
+
+  #define TEST(name) printf("Testing %s... ", name)
+  #define PASS() printf("PASS\n")
+  #define FAIL(msg) do { printf("FAIL: %s\n", msg); exit(1); } while(0)
+
+  // 测试 fork/exec/wait
+  void test_process(void)
+  {
+      TEST("fork/wait");
+      pid_t pid = fork();
+      if (pid < 0) FAIL("fork failed");
+      if (pid == 0) {
+          exit(42);
+      }
+      int status;
+      waitpid(pid, &status, 0);
+      if (WEXITSTATUS(status) != 42) FAIL("wrong exit status");
+      PASS();
+  }
+
+  // 测试管道
+  void test_pipe(void)
+  {
+      TEST("pipe");
+      int fd[2];
+      if (pipe(fd) < 0) FAIL("pipe failed");
+
+      const char *msg = "hello pipe";
+      if (write(fd[1], msg, strlen(msg)) != strlen(msg)) FAIL("write failed");
+
+      char buf[32];
+      if (read(fd[0], buf, sizeof(buf)) != strlen(msg)) FAIL("read failed");
+      if (strncmp(buf, msg, strlen(msg)) != 0) FAIL("data mismatch");
+
+      close(fd[0]);
+      close(fd[1]);
+      PASS();
+  }
+
+  // 测试信号
+  volatile int sig_received = 0;
+  void sig_handler(int sig) { sig_received = sig; }
+
+  void test_signal(void)
+  {
+      TEST("signal");
+      signal(SIGUSR1, sig_handler);
+      kill(getpid(), SIGUSR1);
+      if (sig_received != SIGUSR1) FAIL("signal not received");
+      PASS();
+  }
+
+  // 测试 dup
+  void test_dup(void)
+  {
+      TEST("dup/dup2");
+      int fd = open("/tmp/dup_test", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd < 0) FAIL("open failed");
+
+      int fd2 = dup(fd);
+      if (fd2 < 0) FAIL("dup failed");
+
+      write(fd, "hello", 5);
+      write(fd2, "world", 5);
+
+      close(fd);
+      close(fd2);
+
+      // 验证内容
+      fd = open("/tmp/dup_test", O_RDONLY);
+      char buf[16];
+      read(fd, buf, 10);
+      if (strncmp(buf, "helloworld", 10) != 0) FAIL("content mismatch");
+      close(fd);
+      PASS();
+  }
+
+  int main(void)
+  {
+      printf("=== MinixRV64 POSIX Test Suite ===\n\n");
+
+      test_process();
+      test_pipe();
+      test_signal();
+      test_dup();
+
+      printf("\n=== All tests passed! ===\n");
+      return 0;
+  }
+
+  3. 兼容性测试 - 运行标准程序
+
+  # 移植 busybox（静态编译）
+  wget https://busybox.net/downloads/busybox-1.36.1.tar.bz2
+  tar xf busybox-1.36.1.tar.bz2
+  cd busybox-1.36.1
+
+  make CROSS_COMPILE=riscv64-linux-musl- defconfig
+  make CROSS_COMPILE=riscv64-linux-musl- LDFLAGS=--static -j$(nproc)
+
+  # 测试基本命令
+  ./busybox ls
+  ./busybox cat /etc/passwd
+  ./busybox echo hello
+
+  4. 压力测试
+
+  /* stress_test.c */
+  // fork 炸弹防护测试
+  // 大量文件描述符测试
+  // 内存压力测试
+  // 管道缓冲区溢出测试
 
   阶段6验收标准：
-  - ⬜ 信号机制完整工作
-  - ⬜ 管道通信正常
-  - ⬜ 设备驱动框架可用
-  - ⬜ 通过基本POSIX测试
+  - ⬜ 信号机制完整（SIGINT, SIGTERM, SIGKILL, SIGCHLD 等）
+  - ⬜ 信号处理函数能正确执行和返回
+  - ⬜ 管道读写正常，支持阻塞和非阻塞模式
+  - ⬜ 设备驱动框架可用（字符设备）
+  - ⬜ dup/dup2 正常工作
+  - ⬜ 通过 POSIX 基本测试套件
+  - ⬜ busybox 基本命令可运行
 
   ---
   🎯 最终验收标准
@@ -1721,7 +3160,17 @@
   |------|------|----------|----------|------|
   | 阶段1: 内存管理 | ✅ 完成 | - | 2024-12 | buddy/slab/MMU/vmalloc |
   | 阶段2: 进程管理 | ⬜ 待开始 | - | - | fork/exec/scheduler |
-  | 阶段3: 系统调用 | ⬜ 待开始 | - | - | syscall framework |
-  | 阶段4: C库移植 | ⬜ 待开始 | - | - | newlib/musl |
-  | 阶段5: 文件系统 | ⬜ 待开始 | - | - | ext2/VFS完善 |
-  | 阶段6: 高级特性 | ⬜ 待开始 | - | - | 信号/管道/驱动 |
+  | 阶段3: 系统调用 | ⬜ 待开始 | - | - | Linux RISC-V ABI |
+  | 阶段4: C库移植 | ⬜ 待开始 | - | - | **musl libc** |
+  | 阶段5: 文件系统 | ⬜ 待开始 | - | - | ext2/VFS/dcache/pagecache |
+  | 阶段6: 高级特性 | ⬜ 待开始 | - | - | 信号/管道/设备驱动 |
+
+  ---
+  📝 变更记录
+
+  | 日期 | 变更内容 |
+  |------|----------|
+  | 2024-12 | 阶段1完成：内存管理（buddy/slab/MMU/vmalloc） |
+  | 2025-12 | 阶段4重新设计：从 newlib 改为 **musl libc** |
+  | 2025-12 | 明确项目定位：Minix 微内核 + Linux syscall ABI |
+  | 2025-12 | 项目命名：**MinixRV64 Donz Build** |
