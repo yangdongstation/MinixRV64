@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MinixRV64 is a port of the Minix operating system to RISC-V 64-bit architecture, specifically targeting the MilkV Duo CV1800B development board (T-Head XuanTie C906 CPU). The project implements a microkernel architecture with device drivers, virtual file system, memory management, and a basic shell.
+**MinixRV64 Donz Build** is a Unix-style operating system guided by **Minix microkernel philosophy**, with **Linux syscall ABI** for userspace compatibility. It targets RISC-V 64-bit architecture, specifically the MilkV Duo CV1800B development board (T-Head XuanTie C906 CPU).
+
+**Design Philosophy**:
+- **Kernel**: Minix-style microkernel (minimal kernel, service isolation, message-passing IPC)
+- **Syscall ABI**: Linux RISC-V syscall numbers (compatible with musl libc)
+- **C Library**: musl libc (static linking, runs standard Linux userspace programs)
+- **Executable Format**: Standard 64-bit ELF
 
 **Current Status**: The system boots successfully in QEMU with full interactive shell support. UART input/output works correctly after fixing QEMU serial configuration.
 

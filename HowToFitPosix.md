@@ -1,6 +1,28 @@
-● MinixRV64到POSIX兼容系统的完整技术路线
+● MinixRV64 Donz Build - POSIX兼容系统技术路线
 
   📋 总览
+
+  项目定位：
+  - **Unix 风格操作系统** - 学习和致敬 Minix 的设计理念
+  - **微内核架构** - 以 Minix 微内核思想为主导
+  - **Linux 兼容层** - 采用 Linux 系统调用 ABI，便于移植用户态程序
+  - **教育与实践** - 适合学习操作系统原理和 RISC-V 架构
+
+  设计哲学：
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Minix 微内核精神          │  Linux 实用特性              │
+  │  ─────────────────────     │  ─────────────────────       │
+  │  • 最小化内核               │  • Linux syscall ABI        │
+  │  • 服务隔离                 │  • musl libc 兼容           │
+  │  • 消息传递 IPC             │  • ELF 可执行文件格式       │
+  │  • 可靠性优先               │  • /proc, /sys 文件系统     │
+  │  • 简洁清晰的代码           │  • POSIX 标准接口           │
+  └─────────────────────────────────────────────────────────────┘
+
+  为什么这样设计？
+  1. **微内核优势** - 更好的模块化、可维护性、可靠性
+  2. **Linux ABI** - 直接运行 musl 编译的程序，无需移植
+  3. **学习价值** - 同时理解两种设计思想
 
   目标：将MinixRV64从教育演示级别提升到基本POSIX兼容的操作系统
 
@@ -880,201 +902,609 @@
   - ⬜ 文件描述符管理正确
 
   ---
-  阶段4：C标准库移植（1-2个月）
+  阶段4：C标准库移植 - musl libc（2-3个月）
 
-  任务4.1：选择C库（1周调研）
+  任务4.1：为什么选择 musl 而非 newlib
 
-  选项对比：
+  ═══════════════════════════════════════════════════════════════
+  选项对比（重新评估）
+  ═══════════════════════════════════════════════════════════════
 
-  | C库     | 优点                 | 缺点              | 推荐度   |
-  |--------|--------------------|-----------------|-------|
-  | newlib | 专为嵌入式设计，体积小，易于移植   | 功能较少，不完全兼容POSIX | ⭐⭐⭐⭐⭐ |
-  | musl   | 完整POSIX支持，代码简洁，性能好 | 需要更多系统调用支持      | ⭐⭐⭐⭐  |
-  | glibc  | 功能最完整，兼容性最好        | 体积大，复杂度高，难以移植   | ⭐⭐    |
+  | C库     | 优点                           | 缺点                    | 推荐度   |
+  |--------|------------------------------|------------------------|---------|
+  | musl   | 完整POSIX/Linux兼容，代码简洁，静态链接友好 | 需要更多系统调用支持            | ⭐⭐⭐⭐⭐ |
+  | newlib | 体积小，嵌入式常用               | 不完全兼容POSIX，API有差异     | ⭐⭐⭐   |
+  | glibc  | 功能最完整                      | 体积大，难以移植，动态链接依赖重    | ⭐⭐    |
 
-  推荐：newlib（阶段性目标）→ musl（长期目标）
+  决定：直接使用 musl libc
 
-  任务4.2：移植newlib（3-4周）
+  musl 的核心优势：
+  1. 真正的 POSIX/Linux 兼容 - 系统调用接口与 Linux 完全一致
+  2. 代码简洁清晰 - 约 10 万行代码，易于理解和调试
+  3. 静态链接友好 - 生成的二进制文件独立运行，适合嵌入式
+  4. 安全性高 - 注重安全设计，无 glibc 历史包袱
+  5. 一步到位 - 不需要先移植 newlib 再迁移
 
-  步骤：
+  为什么 MinixRV64 选择 Linux syscall ABI？
+  ┌─────────────────────────────────────────────────────────────┐
+  │  MinixRV64 = Minix 微内核设计 + Linux 用户态兼容            │
+  │                                                             │
+  │  内核层面（Minix 风格）：                                   │
+  │    • 微内核架构，核心精简                                   │
+  │    • 服务进程隔离（VFS、PM、驱动等）                        │
+  │    • 消息传递 IPC                                           │
+  │                                                             │
+  │  用户态接口（Linux 兼容）：                                 │
+  │    • 使用 Linux RISC-V 系统调用号                           │
+  │    • 支持 musl libc 编译的程序                              │
+  │    • 标准 ELF 格式                                          │
+  │                                                             │
+  │  好处：                                                     │
+  │    • 可直接运行大量现有 Linux/musl 程序                     │
+  │    • 无需为每个程序单独移植                                 │
+  │    • 学习时可对比 Minix 和 Linux 的设计差异                 │
+  └─────────────────────────────────────────────────────────────┘
 
-  1. 准备工作
-  # 下载newlib
-  wget ftp://sourceware.org/pub/newlib/newlib-4.3.0.tar.gz
-  tar xf newlib-4.3.0.tar.gz
-  cd newlib-4.3.0
-  2. 实现系统调用stubs
-  /* libgloss/riscv/syscalls.c */
+  musl 对内核的要求（这正是我们需要实现的）：
+  - 约 50-60 个核心系统调用（比 newlib 的 20 个多，但功能完整）
+  - Linux 兼容的系统调用号（RISC-V 使用统一的 Linux syscall ABI）
+  - 正确的 signal 处理
+  - 线程支持（可选，单线程程序可以先不实现）
 
-  // newlib需要的系统调用接口
-  int _open(const char *name, int flags, int mode)
+  ═══════════════════════════════════════════════════════════════
+  任务4.2：musl 移植的系统调用需求分析
+  ═══════════════════════════════════════════════════════════════
+
+  musl 所需的最小系统调用集（分优先级）：
+
+  【P0 - 绝对必需】启动和基本 I/O
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_exit          (93)   - 进程退出                         │
+  │ SYS_exit_group    (94)   - 线程组退出                       │
+  │ SYS_write         (64)   - 写文件/stdout                    │
+  │ SYS_writev        (66)   - 向量写（printf 需要）            │
+  │ SYS_read          (63)   - 读文件/stdin                     │
+  │ SYS_brk           (214)  - 堆内存管理                       │
+  │ SYS_mmap          (222)  - 内存映射（malloc 大块分配）       │
+  │ SYS_munmap        (215)  - 解除映射                         │
+  │ SYS_close         (57)   - 关闭文件描述符                   │
+  │ SYS_openat        (56)   - 打开文件（现代接口）              │
+  │ SYS_fstat         (80)   - 获取文件状态                     │
+  └─────────────────────────────────────────────────────────────┘
+
+  【P1 - 进程管理】fork/exec 需要
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_clone         (220)  - 创建进程/线程                    │
+  │ SYS_execve        (221)  - 执行程序                         │
+  │ SYS_wait4         (260)  - 等待子进程                       │
+  │ SYS_getpid        (172)  - 获取进程 ID                      │
+  │ SYS_getppid       (173)  - 获取父进程 ID                    │
+  │ SYS_getuid        (174)  - 获取用户 ID                      │
+  │ SYS_geteuid       (175)  - 获取有效用户 ID                  │
+  │ SYS_getgid        (176)  - 获取组 ID                        │
+  │ SYS_getegid       (177)  - 获取有效组 ID                    │
+  │ SYS_gettid        (178)  - 获取线程 ID                      │
+  │ SYS_set_tid_address (96) - 设置 TID 地址（线程）            │
+  └─────────────────────────────────────────────────────────────┘
+
+  【P2 - 文件系统】完整文件操作
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_lseek         (62)   - 文件定位                         │
+  │ SYS_ioctl         (29)   - 设备控制                         │
+  │ SYS_readv         (65)   - 向量读                           │
+  │ SYS_pread64       (67)   - 位置读                           │
+  │ SYS_pwrite64      (68)   - 位置写                           │
+  │ SYS_fcntl         (25)   - 文件控制                         │
+  │ SYS_dup           (23)   - 复制文件描述符                   │
+  │ SYS_dup3          (24)   - 复制文件描述符（带标志）          │
+  │ SYS_mkdirat       (34)   - 创建目录                         │
+  │ SYS_unlinkat      (35)   - 删除文件                         │
+  │ SYS_renameat      (38)   - 重命名                           │
+  │ SYS_fstatat       (79)   - 获取文件状态（相对路径）          │
+  │ SYS_readlinkat    (78)   - 读取符号链接                     │
+  │ SYS_faccessat     (48)   - 检查访问权限                     │
+  │ SYS_getcwd        (17)   - 获取当前目录                     │
+  │ SYS_chdir         (49)   - 切换目录                         │
+  │ SYS_fchdir        (50)   - 切换目录（fd）                   │
+  │ SYS_getdents64    (61)   - 读取目录项                       │
+  │ SYS_pipe2         (59)   - 创建管道                         │
+  └─────────────────────────────────────────────────────────────┘
+
+  【P3 - 信号】信号处理
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_rt_sigaction  (134)  - 设置信号处理                     │
+  │ SYS_rt_sigprocmask(135)  - 信号屏蔽                         │
+  │ SYS_rt_sigreturn  (139)  - 信号返回                         │
+  │ SYS_kill          (129)  - 发送信号                         │
+  │ SYS_tgkill        (131)  - 发送信号给线程                   │
+  └─────────────────────────────────────────────────────────────┘
+
+  【P4 - 时间】时间相关
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_clock_gettime (113)  - 获取时钟                         │
+  │ SYS_nanosleep     (101)  - 睡眠                             │
+  │ SYS_gettimeofday  (169)  - 获取时间                         │
+  └─────────────────────────────────────────────────────────────┘
+
+  【P5 - 可选/线程】多线程支持（可以后续添加）
+  ┌─────────────────────────────────────────────────────────────┐
+  │ SYS_futex         (98)   - 快速用户空间互斥                 │
+  │ SYS_mprotect      (226)  - 修改内存保护                     │
+  │ SYS_madvise       (233)  - 内存建议                         │
+  └─────────────────────────────────────────────────────────────┘
+
+  ═══════════════════════════════════════════════════════════════
+  任务4.3：内核系统调用表实现
+  ═══════════════════════════════════════════════════════════════
+
+  RISC-V Linux 系统调用约定：
+  - a7 = 系统调用号
+  - a0-a5 = 参数
+  - a0 = 返回值
+  - 使用 ecall 指令触发
+
+  /* arch/riscv64/kernel/syscall_table.c */
+
+  #include <minix/syscall.h>
+
+  // 系统调用号定义（遵循 Linux RISC-V ABI）
+  #define __NR_getcwd          17
+  #define __NR_dup             23
+  #define __NR_dup3            24
+  #define __NR_fcntl           25
+  #define __NR_ioctl           29
+  #define __NR_mkdirat         34
+  #define __NR_unlinkat        35
+  #define __NR_renameat        38
+  #define __NR_faccessat       48
+  #define __NR_chdir           49
+  #define __NR_fchdir          50
+  #define __NR_openat          56
+  #define __NR_close           57
+  #define __NR_pipe2           59
+  #define __NR_getdents64      61
+  #define __NR_lseek           62
+  #define __NR_read            63
+  #define __NR_write           64
+  #define __NR_readv           65
+  #define __NR_writev          66
+  #define __NR_pread64         67
+  #define __NR_pwrite64        68
+  #define __NR_readlinkat      78
+  #define __NR_fstatat         79
+  #define __NR_fstat           80
+  #define __NR_exit            93
+  #define __NR_exit_group      94
+  #define __NR_set_tid_address 96
+  #define __NR_futex           98
+  #define __NR_nanosleep       101
+  #define __NR_clock_gettime   113
+  #define __NR_kill            129
+  #define __NR_tgkill          131
+  #define __NR_rt_sigaction    134
+  #define __NR_rt_sigprocmask  135
+  #define __NR_rt_sigreturn    139
+  #define __NR_gettimeofday    169
+  #define __NR_getpid          172
+  #define __NR_getppid         173
+  #define __NR_getuid          174
+  #define __NR_geteuid         175
+  #define __NR_getgid          176
+  #define __NR_getegid         177
+  #define __NR_gettid          178
+  #define __NR_brk             214
+  #define __NR_munmap          215
+  #define __NR_clone           220
+  #define __NR_execve          221
+  #define __NR_mmap            222
+  #define __NR_mprotect        226
+  #define __NR_madvise         233
+  #define __NR_wait4           260
+
+  #define __NR_syscalls        512  // 系统调用表大小
+
+  typedef long (*syscall_fn_t)(long, long, long, long, long, long);
+
+  // 未实现的系统调用返回 -ENOSYS
+  static long sys_ni_syscall(long a0, long a1, long a2,
+                             long a3, long a4, long a5)
   {
-      return syscall(SYS_open, name, flags, mode);
+      return -ENOSYS;
   }
 
-  int _close(int fd)
-  {
-      return syscall(SYS_close, fd);
-  }
+  // 系统调用表
+  syscall_fn_t sys_call_table[__NR_syscalls] = {
+      [0 ... __NR_syscalls-1] = sys_ni_syscall,
 
-  int _read(int fd, void *buf, size_t count)
-  {
-      return syscall(SYS_read, fd, buf, count);
-  }
+      // P0 - 必需
+      [__NR_exit]           = (syscall_fn_t)sys_exit,
+      [__NR_exit_group]     = (syscall_fn_t)sys_exit_group,
+      [__NR_read]           = (syscall_fn_t)sys_read,
+      [__NR_write]          = (syscall_fn_t)sys_write,
+      [__NR_writev]         = (syscall_fn_t)sys_writev,
+      [__NR_openat]         = (syscall_fn_t)sys_openat,
+      [__NR_close]          = (syscall_fn_t)sys_close,
+      [__NR_fstat]          = (syscall_fn_t)sys_fstat,
+      [__NR_brk]            = (syscall_fn_t)sys_brk,
+      [__NR_mmap]           = (syscall_fn_t)sys_mmap,
+      [__NR_munmap]         = (syscall_fn_t)sys_munmap,
 
-  int _write(int fd, const void *buf, size_t count)
-  {
-      return syscall(SYS_write, fd, buf, count);
-  }
+      // P1 - 进程
+      [__NR_clone]          = (syscall_fn_t)sys_clone,
+      [__NR_execve]         = (syscall_fn_t)sys_execve,
+      [__NR_wait4]          = (syscall_fn_t)sys_wait4,
+      [__NR_getpid]         = (syscall_fn_t)sys_getpid,
+      [__NR_getppid]        = (syscall_fn_t)sys_getppid,
+      [__NR_getuid]         = (syscall_fn_t)sys_getuid,
+      [__NR_geteuid]        = (syscall_fn_t)sys_geteuid,
+      [__NR_getgid]         = (syscall_fn_t)sys_getgid,
+      [__NR_getegid]        = (syscall_fn_t)sys_getegid,
+      [__NR_gettid]         = (syscall_fn_t)sys_gettid,
+      [__NR_set_tid_address]= (syscall_fn_t)sys_set_tid_address,
 
-  int _fstat(int fd, struct stat *st)
-  {
-      return syscall(SYS_fstat, fd, st);
-  }
+      // P2 - 文件系统
+      [__NR_lseek]          = (syscall_fn_t)sys_lseek,
+      [__NR_ioctl]          = (syscall_fn_t)sys_ioctl,
+      [__NR_readv]          = (syscall_fn_t)sys_readv,
+      [__NR_pread64]        = (syscall_fn_t)sys_pread64,
+      [__NR_pwrite64]       = (syscall_fn_t)sys_pwrite64,
+      [__NR_fcntl]          = (syscall_fn_t)sys_fcntl,
+      [__NR_dup]            = (syscall_fn_t)sys_dup,
+      [__NR_dup3]           = (syscall_fn_t)sys_dup3,
+      [__NR_mkdirat]        = (syscall_fn_t)sys_mkdirat,
+      [__NR_unlinkat]       = (syscall_fn_t)sys_unlinkat,
+      [__NR_renameat]       = (syscall_fn_t)sys_renameat,
+      [__NR_fstatat]        = (syscall_fn_t)sys_fstatat,
+      [__NR_readlinkat]     = (syscall_fn_t)sys_readlinkat,
+      [__NR_faccessat]      = (syscall_fn_t)sys_faccessat,
+      [__NR_getcwd]         = (syscall_fn_t)sys_getcwd,
+      [__NR_chdir]          = (syscall_fn_t)sys_chdir,
+      [__NR_fchdir]         = (syscall_fn_t)sys_fchdir,
+      [__NR_getdents64]     = (syscall_fn_t)sys_getdents64,
+      [__NR_pipe2]          = (syscall_fn_t)sys_pipe2,
 
-  int _lseek(int fd, off_t offset, int whence)
-  {
-      return syscall(SYS_lseek, fd, offset, whence);
-  }
+      // P3 - 信号
+      [__NR_rt_sigaction]   = (syscall_fn_t)sys_rt_sigaction,
+      [__NR_rt_sigprocmask] = (syscall_fn_t)sys_rt_sigprocmask,
+      [__NR_rt_sigreturn]   = (syscall_fn_t)sys_rt_sigreturn,
+      [__NR_kill]           = (syscall_fn_t)sys_kill,
+      [__NR_tgkill]         = (syscall_fn_t)sys_tgkill,
 
-  int _isatty(int fd)
-  {
-      return 1;  // 简化实现
-  }
+      // P4 - 时间
+      [__NR_clock_gettime]  = (syscall_fn_t)sys_clock_gettime,
+      [__NR_nanosleep]      = (syscall_fn_t)sys_nanosleep,
+      [__NR_gettimeofday]   = (syscall_fn_t)sys_gettimeofday,
 
-  void *_sbrk(ptrdiff_t incr)
-  {
-      extern char end;  // 由链接器提供
-      static char *heap_end = &end;
-      char *prev_heap_end = heap_end;
+      // P5 - 线程/内存
+      [__NR_futex]          = (syscall_fn_t)sys_futex,
+      [__NR_mprotect]       = (syscall_fn_t)sys_mprotect,
+      [__NR_madvise]        = (syscall_fn_t)sys_madvise,
+  };
 
-      // 使用brk系统调用
-      if (syscall(SYS_brk, heap_end + incr) < 0)
-          return (void *)-1;
+  ═══════════════════════════════════════════════════════════════
+  任务4.4：musl 交叉编译工具链构建
+  ═══════════════════════════════════════════════════════════════
 
-      heap_end += incr;
-      return prev_heap_end;
-  }
+  方案A：使用 musl-cross-make（推荐）
 
-  int _kill(int pid, int sig)
-  {
-      return syscall(SYS_kill, pid, sig);
-  }
+  # 克隆 musl-cross-make
+  git clone https://github.com/richfelker/musl-cross-make
+  cd musl-cross-make
 
-  int _getpid(void)
-  {
-      return syscall(SYS_getpid);
-  }
-  3. 配置和编译
-  mkdir build-newlib
-  cd build-newlib
+  # 创建配置文件
+  cat > config.mak << 'EOF'
+  TARGET = riscv64-linux-musl
+  OUTPUT = /opt/cross/riscv64-linux-musl
 
-  ../configure \
-      --target=riscv64-unknown-elf \
-      --prefix=/opt/riscv64-minix \
-      --disable-multilib \
-      --enable-newlib-io-long-long \
-      --enable-newlib-register-fini \
-      --disable-newlib-supplied-syscalls
+  # GCC 版本
+  GCC_VER = 13.2.0
+  MUSL_VER = 1.2.4
+  BINUTILS_VER = 2.41
 
+  # 优化选项
+  COMMON_CONFIG += --disable-nls
+  GCC_CONFIG += --enable-languages=c,c++
+  GCC_CONFIG += --disable-libquadmath
+  GCC_CONFIG += --disable-decimal-float
+  EOF
+
+  # 构建（需要较长时间）
   make -j$(nproc)
   make install
-  4. 创建启动代码
-  /* crt0.S - C runtime startup */
 
-  .section .text.init
-  .global _start
-  _start:
-      // 清空bss段
-      la t0, __bss_start
-      la t1, __bss_end
-  1:  sd zero, 0(t0)
-      addi t0, t0, 8
-      blt t0, t1, 1b
+  # 添加到 PATH
+  export PATH=/opt/cross/riscv64-linux-musl/bin:$PATH
 
-      // 设置栈指针（由内核传入）
-      // sp已经由内核设置好
+  方案B：直接下载预编译工具链
 
-      // 设置全局指针
-      .option push
-      .option norelax
-      la gp, __global_pointer$
-      .option pop
+  # 从 musl.cc 下载预编译工具链
+  wget https://musl.cc/riscv64-linux-musl-cross.tgz
+  tar xf riscv64-linux-musl-cross.tgz
+  export PATH=$PWD/riscv64-linux-musl-cross/bin:$PATH
 
-      // 调用全局构造函数
-      call __libc_init_array
+  验证：
+  riscv64-linux-musl-gcc --version
+  # riscv64-linux-musl-gcc (GCC) 13.x.x
 
-      // 调用main（argc, argv, envp由内核传入）
-      // a0 = argc, a1 = argv, a2 = envp
-      call main
+  ═══════════════════════════════════════════════════════════════
+  任务4.5：用户空间启动代码（crt）
+  ═══════════════════════════════════════════════════════════════
 
-      // 调用exit（main返回值在a0）
-      call exit
+  musl 自带 crt（crt1.o, crti.o, crtn.o），但我们需要确保内核
+  正确设置用户态栈和寄存器。
 
-      // 不应该到达这里
-  1:  j 1b
+  内核设置用户态入口（在 execve 中）：
 
-  任务4.3：测试C库功能（1周）
+  /* kernel/exec.c */
 
-  创建测试程序：
+  int setup_user_stack(struct task_struct *task,
+                       int argc, char **argv, char **envp)
+  {
+      unsigned long sp = task->mm->start_stack;
+      unsigned long *stack = (unsigned long *)sp;
 
-  /* userspace/test_libc.c */
+      // Linux/musl ABI 要求的栈布局：
+      //
+      // 高地址
+      // ┌─────────────────────────────┐
+      // │ 环境变量字符串              │
+      // │ 参数字符串                  │
+      // │ 填充（16字节对齐）          │
+      // ├─────────────────────────────┤
+      // │ auxv[n] = {AT_NULL, 0}      │
+      // │ ...                         │
+      // │ auxv[0] = {type, value}     │
+      // ├─────────────────────────────┤
+      // │ NULL                        │
+      // │ envp[n-1]                   │
+      // │ ...                         │
+      // │ envp[0]                     │
+      // ├─────────────────────────────┤
+      // │ NULL                        │
+      // │ argv[n-1]                   │
+      // │ ...                         │
+      // │ argv[0]                     │
+      // ├─────────────────────────────┤
+      // │ argc                        │ ← sp 入口点
+      // └─────────────────────────────┘
+      // 低地址
 
+      // 1. 复制字符串到栈顶
+      // 2. 设置 argv[] 指针数组
+      // 3. 设置 envp[] 指针数组
+      // 4. 设置 auxv（辅助向量）- musl 需要这个！
+
+      // auxv 是 musl 必需的：
+      Elf64_auxv_t auxv[] = {
+          {AT_PAGESZ, PAGE_SIZE},           // 页大小
+          {AT_PHDR, task->mm->elf_phdr},    // 程序头地址
+          {AT_PHENT, sizeof(Elf64_Phdr)},   // 程序头条目大小
+          {AT_PHNUM, task->mm->elf_phnum},  // 程序头数量
+          {AT_ENTRY, task->mm->elf_entry},  // 入口点
+          {AT_UID, 0}, {AT_EUID, 0},        // UID
+          {AT_GID, 0}, {AT_EGID, 0},        // GID
+          {AT_SECURE, 0},                    // 安全模式
+          {AT_RANDOM, random_ptr},           // 16字节随机数地址
+          {AT_NULL, 0}                       // 结束标记
+      };
+
+      // 写入栈...
+      return 0;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务4.6：编译用户程序
+  ═══════════════════════════════════════════════════════════════
+
+  静态链接 Hello World：
+
+  /* userspace/hello.c */
   #include <stdio.h>
-  #include <stdlib.h>
-  #include <string.h>
   #include <unistd.h>
-  #include <fcntl.h>
 
   int main(int argc, char **argv)
   {
-      printf("Hello from userspace!\n");
-      printf("argc = %d\n", argc);
+      printf("Hello from MinixRV64 with musl!\n");
+      printf("PID: %d\n", getpid());
 
-      // 测试文件操作
-      int fd = open("/test.txt", O_WRONLY | O_CREAT, 0644);
-      if (fd < 0) {
-          perror("open");
-          return 1;
-      }
-
-      const char *msg = "Hello, file system!\n";
-      write(fd, msg, strlen(msg));
-      close(fd);
-
-      // 测试malloc
-      char *buf = malloc(1024);
-      strcpy(buf, "Dynamic memory works!");
-      printf("%s\n", buf);
-      free(buf);
-
-      // 测试fork
-      pid_t pid = fork();
-      if (pid == 0) {
-          printf("Child process: pid=%d\n", getpid());
-          exit(0);
-      } else {
-          printf("Parent process: child pid=%d\n", pid);
-          int status;
-          wait(&status);
-          printf("Child exited with status %d\n", status);
+      for (int i = 0; i < argc; i++) {
+          printf("argv[%d] = %s\n", i, argv[i]);
       }
 
       return 0;
   }
 
-  编译：
-  riscv64-unknown-elf-gcc -o test_libc test_libc.c \
-      -nostartfiles -nostdlib \
-      -L/opt/riscv64-minix/lib \
-      -lc -lgcc \
-      /opt/riscv64-minix/lib/crt0.o
+  编译（静态链接）：
+  riscv64-linux-musl-gcc -static -o hello hello.c
 
-  阶段4验收标准：
-  - ⬜ newlib成功编译和链接
-  - ⬜ printf/scanf等stdio函数工作
-  - ⬜ malloc/free正常工作
-  - ⬜ 能编译和运行简单的用户程序
+  查看依赖的系统调用（用于测试）：
+  riscv64-linux-musl-objdump -d hello | grep ecall
+
+  最小测试程序（不依赖 libc）：
+
+  /* userspace/minimal.S */
+  .global _start
+  _start:
+      # write(1, msg, 14)
+      li a7, 64          # SYS_write
+      li a0, 1           # fd = stdout
+      la a1, msg         # buf
+      li a2, 14          # count
+      ecall
+
+      # exit(0)
+      li a7, 93          # SYS_exit
+      li a0, 0           # status
+      ecall
+
+  .section .rodata
+  msg:
+      .ascii "Hello World!\n\0"
+
+  编译：
+  riscv64-linux-musl-as -o minimal.o minimal.S
+  riscv64-linux-musl-ld -o minimal minimal.o
+
+  ═══════════════════════════════════════════════════════════════
+  任务4.7：系统调用实现示例
+  ═══════════════════════════════════════════════════════════════
+
+  /* kernel/syscalls/write.c */
+
+  #include <minix/syscall.h>
+  #include <minix/fs.h>
+  #include <minix/errno.h>
+
+  // writev - musl 的 printf 会用到这个
+  long sys_writev(int fd, const struct iovec *iov, int iovcnt)
+  {
+      struct file *file;
+      ssize_t total = 0;
+
+      if (fd < 0 || iovcnt < 0)
+          return -EINVAL;
+
+      file = fget(fd);
+      if (!file)
+          return -EBADF;
+
+      for (int i = 0; i < iovcnt; i++) {
+          if (iov[i].iov_len == 0)
+              continue;
+
+          ssize_t ret = vfs_write(file, iov[i].iov_base,
+                                  iov[i].iov_len, &file->f_pos);
+          if (ret < 0) {
+              fput(file);
+              return ret;
+          }
+          total += ret;
+      }
+
+      fput(file);
+      return total;
+  }
+
+  /* kernel/syscalls/mmap.c */
+
+  // mmap - musl 的 malloc 大块分配用这个
+  long sys_mmap(unsigned long addr, size_t len, int prot,
+                int flags, int fd, off_t offset)
+  {
+      struct mm_struct *mm = current->mm;
+
+      // 简化实现：只支持匿名映射
+      if (!(flags & MAP_ANONYMOUS)) {
+          // 文件映射需要更复杂的实现
+          if (fd >= 0)
+              return -ENODEV;  // 暂不支持
+      }
+
+      // 分配虚拟地址空间
+      unsigned long ret = do_mmap(mm, addr, len, prot, flags, fd, offset);
+
+      return ret;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务4.8：测试验收
+  ═══════════════════════════════════════════════════════════════
+
+  阶段4分步验收：
+
+  Step 1: 最小汇编程序运行
+  - ⬜ minimal.S 输出 "Hello World!"
+  - ⬜ sys_write + sys_exit 正常工作
+
+  Step 2: musl 静态程序启动
+  - ⬜ 内核正确设置用户栈（argc/argv/envp/auxv）
+  - ⬜ _start → __libc_start_main → main 链正常
+  - ⬜ printf("Hello") 正常输出
+
+  Step 3: 完整 libc 功能
+  - ⬜ malloc/free 正常（brk + mmap）
+  - ⬜ 文件操作（open/read/write/close）
+  - ⬜ fork/exec 正常
+  - ⬜ 信号处理正常
+
+  测试程序：
+
+  /* userspace/test_musl.c */
+  #include <stdio.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include <unistd.h>
+  #include <fcntl.h>
+  #include <sys/wait.h>
+  #include <errno.h>
+
+  int main(int argc, char **argv)
+  {
+      printf("=== musl libc Test Suite ===\n\n");
+
+      // Test 1: 基本 I/O
+      printf("[TEST 1] printf works!\n");
+
+      // Test 2: malloc
+      printf("[TEST 2] malloc: ");
+      char *buf = malloc(256);
+      if (buf) {
+          strcpy(buf, "Dynamic memory works!");
+          printf("%s\n", buf);
+          free(buf);
+      } else {
+          printf("FAILED\n");
+          return 1;
+      }
+
+      // Test 3: 文件操作
+      printf("[TEST 3] File I/O: ");
+      int fd = open("/tmp/test.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd >= 0) {
+          write(fd, "test\n", 5);
+          close(fd);
+          printf("OK\n");
+      } else {
+          printf("open failed: %s\n", strerror(errno));
+      }
+
+      // Test 4: fork
+      printf("[TEST 4] fork: ");
+      pid_t pid = fork();
+      if (pid < 0) {
+          printf("fork failed: %s\n", strerror(errno));
+      } else if (pid == 0) {
+          // 子进程
+          printf("child (pid=%d)\n", getpid());
+          exit(42);
+      } else {
+          // 父进程
+          int status;
+          waitpid(pid, &status, 0);
+          printf("parent, child exited with %d\n", WEXITSTATUS(status));
+      }
+
+      // Test 5: 环境变量
+      printf("[TEST 5] Environment: ");
+      char *path = getenv("PATH");
+      printf("PATH=%s\n", path ? path : "(null)");
+
+      printf("\n=== All tests completed ===\n");
+      return 0;
+  }
+
+  编译和运行：
+  riscv64-linux-musl-gcc -static -o test_musl test_musl.c
+  # 将 test_musl 放入 ramfs 或通过其他方式加载到内核
+  # 在 shell 中执行：exec /test_musl
+
+  阶段4验收标准（musl）：
+  - ⬜ musl 交叉编译工具链可用
+  - ⬜ 最小汇编程序正常运行
+  - ⬜ musl 静态链接程序正常启动
+  - ⬜ printf/scanf 等 stdio 函数工作
+  - ⬜ malloc/free 正常工作（brk + mmap）
+  - ⬜ 能编译和运行完整的用户程序
 
   ---
   阶段5：文件系统完善（2-3个月）

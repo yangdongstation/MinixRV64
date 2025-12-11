@@ -1,4 +1,15 @@
-# Minix RV64 for MilkV Duo CV1800B
+# MinixRV64 Donz Build
+
+## 项目定位
+
+**MinixRV64 Donz Build** 是一个 **Unix 风格操作系统**，以 **Minix 微内核思想**为主导，同时采用 **Linux 系统调用 ABI** 实现用户态兼容。
+
+| 设计层面 | 采用方案 | 说明 |
+|---------|---------|------|
+| 内核架构 | **Minix 微内核** | 最小化内核、服务隔离、消息传递 IPC |
+| 系统调用 | **Linux ABI** | RISC-V Linux syscall 编号，兼容 musl |
+| C 标准库 | **musl libc** | 静态链接，直接运行 Linux 用户态程序 |
+| 可执行格式 | **ELF** | 标准 64 位 ELF |
 
 ## 目标
 将 Minix 操作系统移植到 RISC-V 64位架构，特别针对 MilkV Duo CV1800B 开发板。
