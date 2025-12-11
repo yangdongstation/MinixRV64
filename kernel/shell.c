@@ -12,6 +12,7 @@
 /* External functions */
 extern void early_puts(const char *s);
 extern void early_putchar(char c);
+extern void early_puthex(unsigned long val);
 extern char uart_getchar(void);
 extern int uart_haschar(void);
 
@@ -20,11 +21,14 @@ extern int strcmp(const char *s1, const char *s2);
 extern char *strncpy(char *dest, const char *src, unsigned long n);
 extern unsigned long strlen(const char *s);
 
+/* VFS types */
+typedef struct file file_t;
+
 /* VFS functions */
-extern int vfs_open(const char *path, int flags);
-extern int vfs_close(int fd);
-extern long vfs_read(int fd, void *buf, unsigned long count);
-extern long vfs_write(int fd, const void *buf, unsigned long count);
+extern file_t *vfs_open(const char *path, int flags);
+extern int vfs_close(file_t *file);
+extern long vfs_read(file_t *file, void *buf, unsigned long count);
+extern long vfs_write(file_t *file, const void *buf, unsigned long count);
 extern int vfs_mkdir(const char *path, int mode);
 extern int vfs_readdir(const char *path, void *dirents, int count);
 extern int vfs_mount(const char *device, const char *mount_point, const char *fstype);
@@ -251,8 +255,17 @@ int cmd_ls(int argc, char **argv)
         path = argv[1];
     }
 
+    early_puts("[ls] Reading directory: ");
+    early_puts(path);
+    early_puts("\n");
+
     /* Read directory */
     count = vfs_readdir(path, dirents, 32);
+
+    early_puts("[ls] vfs_readdir returned count = ");
+    early_puthex(count);
+    early_puts("\n");
+
     if (count < 0) {
         early_puts("ls: cannot access '");
         early_puts(path);
@@ -276,7 +289,7 @@ int cmd_ls(int argc, char **argv)
 int cmd_cat(int argc, char **argv)
 {
     char buffer[256];
-    int fd;
+    file_t *file;
     long bytes_read;
 
     if (argc < 2) {
@@ -285,8 +298,8 @@ int cmd_cat(int argc, char **argv)
     }
 
     /* Open file */
-    fd = vfs_open(argv[1], 0);  /* O_RDONLY = 0 */
-    if (fd < 0) {
+    file = vfs_open(argv[1], 0);  /* O_RDONLY = 0 */
+    if (file == NULL) {
         early_puts("cat: cannot open '");
         early_puts(argv[1]);
         early_puts("'\n");
@@ -294,12 +307,12 @@ int cmd_cat(int argc, char **argv)
     }
 
     /* Read and print file contents */
-    while ((bytes_read = vfs_read(fd, buffer, sizeof(buffer) - 1)) > 0) {
+    while ((bytes_read = vfs_read(file, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[bytes_read] = '\0';
         early_puts(buffer);
     }
 
-    vfs_close(fd);
+    vfs_close(file);
     return 0;
 }
 
@@ -340,7 +353,7 @@ int cmd_mkdir(int argc, char **argv)
 
 int cmd_touch(int argc, char **argv)
 {
-    int fd;
+    file_t *file;
 
     if (argc < 2) {
         early_puts("Usage: touch <file>\n");
@@ -348,22 +361,23 @@ int cmd_touch(int argc, char **argv)
     }
 
     /* Create file with O_CREAT | O_WRONLY = 0x101 */
-    fd = vfs_open(argv[1], 0x101);
-    if (fd < 0) {
+    file = vfs_open(argv[1], 0x101);
+    if (file == NULL) {
         early_puts("touch: cannot create '");
         early_puts(argv[1]);
         early_puts("'\n");
         return -1;
     }
 
-    vfs_close(fd);
+    vfs_close(file);
     return 0;
 }
 
 int cmd_write(int argc, char **argv)
 {
     char buffer[512];
-    int fd, i;
+    file_t *file;
+    int i;
     unsigned long pos = 0;
     unsigned long len;
 
@@ -391,8 +405,8 @@ int cmd_write(int argc, char **argv)
     buffer[pos] = '\0';
 
     /* Open file for writing (O_CREAT | O_WRONLY | O_TRUNC = 0x301) */
-    fd = vfs_open(argv[1], 0x301);
-    if (fd < 0) {
+    file = vfs_open(argv[1], 0x301);
+    if (file == NULL) {
         early_puts("write: cannot open '");
         early_puts(argv[1]);
         early_puts("'\n");
@@ -401,13 +415,13 @@ int cmd_write(int argc, char **argv)
 
     /* Write buffer to file */
     len = strlen(buffer);
-    if (vfs_write(fd, buffer, len) < 0) {
+    if (vfs_write(file, buffer, len) < 0) {
         early_puts("write: write failed\n");
-        vfs_close(fd);
+        vfs_close(file);
         return -1;
     }
 
-    vfs_close(fd);
+    vfs_close(file);
     return 0;
 }
 

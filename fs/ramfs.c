@@ -11,7 +11,8 @@
 
 /* Maximum number of files in ramfs */
 #define RAMFS_MAX_FILES     256
-#define RAMFS_MAX_FILE_SIZE (1024 * 1024)  /* 1MB per file */
+#define RAMFS_MAX_FILE_SIZE (4 * 1024)  /* 4KB per file (reduced due to kmalloc bug) */
+#define RAMFS_BUFFER_SIZE   (RAMFS_MAX_FILES * RAMFS_MAX_FILE_SIZE)  /* Total buffer pool */
 
 /* ramfs file structure */
 typedef struct ramfs_file {
@@ -29,6 +30,8 @@ typedef struct ramfs_file {
 /* ramfs state */
 static struct {
     ramfs_file_t files[RAMFS_MAX_FILES];
+    inode_t inodes[RAMFS_MAX_FILES];  /* Static inode array - workaround for kmalloc bug */
+    char file_buffers[RAMFS_MAX_FILES][RAMFS_MAX_FILE_SIZE];  /* Static file data buffers */
     int file_count;
     inode_t *root_inode;
     u64 next_ino;
@@ -90,14 +93,23 @@ static int ramfs_mount(const char *device, const char *mount_point)
     early_puts("\n");
 
     /* Initialize state */
-    ramfs_state.file_count = 0;
     ramfs_state.next_ino = 2;  /* Start from 2 (1 is root) */
 
-    /* Create root inode */
-    ramfs_state.root_inode = (inode_t *)kmalloc(sizeof(inode_t));
-    if (ramfs_state.root_inode == NULL) {
-        return -1;
-    }
+    /* Create root file entry at index 0 */
+    ramfs_file_t *root_file = &ramfs_state.files[0];
+    ramfs_state.file_count = 1;  /* Root occupies slot 0 */
+    root_file->name[0] = '/';
+    root_file->name[1] = '\0';
+    root_file->ino = 1;
+    root_file->mode = S_IFDIR | 0755;
+    root_file->size = 0;
+    root_file->data = NULL;
+    root_file->capacity = 0;
+    root_file->parent = NULL;
+    root_file->next = NULL;
+
+    /* Create root inode - use static array instead of kmalloc (workaround) */
+    ramfs_state.root_inode = &ramfs_state.inodes[0];
 
     ramfs_state.root_inode->ino = 1;
     ramfs_state.root_inode->mode = S_IFDIR | 0755;
@@ -107,7 +119,9 @@ static int ramfs_mount(const char *device, const char *mount_point)
     ramfs_state.root_inode->size = 0;
     ramfs_state.root_inode->parent = NULL;
     ramfs_state.root_inode->next = NULL;
-    ramfs_state.root_inode->fs_private = NULL;
+    ramfs_state.root_inode->fs_private = (void *)root_file;
+
+    root_file->inode = ramfs_state.root_inode;
 
     early_puts("ramfs: Mounted successfully\n");
     return 0;
@@ -250,19 +264,22 @@ static ssize_t ramfs_write(file_t *file, const void *buf, size_t count)
     }
 
     if (new_size > rf->capacity) {
-        /* Reallocate buffer */
-        void *new_data = kmalloc(new_size);
-        if (new_data == NULL) {
+        /* Use static buffer instead of kmalloc (workaround for kmalloc bug) */
+        int file_index = rf - ramfs_state.files;
+        if (file_index < 0 || file_index >= RAMFS_MAX_FILES) {
             return -1;
         }
 
-        if (rf->data) {
-            memcpy(new_data, rf->data, rf->size);
-            kfree(rf->data);
+        /* First time allocation - point to static buffer */
+        if (rf->data == NULL) {
+            rf->data = ramfs_state.file_buffers[file_index];
+            rf->capacity = RAMFS_MAX_FILE_SIZE;
         }
 
-        rf->data = new_data;
-        rf->capacity = new_size;
+        /* Check if new size exceeds static buffer */
+        if (new_size > RAMFS_MAX_FILE_SIZE) {
+            return -1;  /* File too large for static buffer */
+        }
     }
 
     /* Copy data */
@@ -317,35 +334,48 @@ static int ramfs_mkdir(inode_t *parent, const char *name, u32 mode)
     }
     *dst = '\0';
 
+    early_puts("[ramfs_mkdir] Setting file ino\n");
     file->ino = ramfs_state.next_ino++;
+    early_puts("[ramfs_mkdir] Setting file mode\n");
     file->mode = S_IFDIR | mode;
+    early_puts("[ramfs_mkdir] Setting file size\n");
     file->size = 0;
+    early_puts("[ramfs_mkdir] Setting file data\n");
     file->data = NULL;
+    early_puts("[ramfs_mkdir] Setting file capacity\n");
     file->capacity = 0;
+    early_puts("[ramfs_mkdir] Setting file parent\n");
     file->parent = parent_file;
+    early_puts("[ramfs_mkdir] Setting file next\n");
     file->next = NULL;
 
-    /* Create inode */
-    early_puts("[ramfs_mkdir] Calling kmalloc for inode\n");
-    inode = (inode_t *)kmalloc(sizeof(inode_t));
-    if (inode == NULL) {
-        early_puts("[ramfs_mkdir] kmalloc failed\n");
-        return -1;
-    }
+    /* Create inode - use static array instead of kmalloc (workaround for kmalloc bug) */
+    early_puts("[ramfs_mkdir] Using static inode array\n");
+    inode = &ramfs_state.inodes[ramfs_state.file_count];
 
     early_puts("[ramfs_mkdir] Initializing inode\n");
     inode->ino = file->ino;
+    early_puts("[ramfs_mkdir] Initializing inode step 2\n");
     inode->mode = file->mode;
+    early_puts("[ramfs_mkdir] Initializing inode step 3\n");
     inode->nlink = 2;
+    early_puts("[ramfs_mkdir] Initializing inode step 4\n");
     inode->uid = 0;
+    early_puts("[ramfs_mkdir] Initializing inode step 5\n");
     inode->gid = 0;
+    early_puts("[ramfs_mkdir] Initializing inode step 6\n");
     inode->size = 0;
+    early_puts("[ramfs_mkdir] Initializing inode step 7\n");
     inode->parent = parent;
+    early_puts("[ramfs_mkdir] Initializing inode step 8\n");
     inode->next = NULL;
+    early_puts("[ramfs_mkdir] Initializing inode step 9\n");
     inode->fs_private = (void *)file;
 
+    early_puts("[ramfs_mkdir] Setting file->inode\n");
     file->inode = inode;
 
+    early_puts("[ramfs_mkdir] Incrementing counters\n");
     ramfs_state.file_count++;
     parent->nlink++;
 

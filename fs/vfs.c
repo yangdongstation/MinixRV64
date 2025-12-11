@@ -610,22 +610,40 @@ int vfs_readdir(const char *path, dirent_t *entries, int count)
 {
     inode_t *inode;
     mount_point_t *mnt;
+    int result;
+
+    early_puts("[vfs_readdir] path: ");
+    early_puts(path);
+    early_puts("\n");
 
     if (path == NULL || entries == NULL) {
+        early_puts("[vfs_readdir] NULL params\n");
         return -1;
     }
 
     inode = vfs_lookup_path(path);
     if (inode == NULL) {
+        early_puts("[vfs_readdir] inode not found\n");
         return -1;
     }
+
+    early_puts("[vfs_readdir] inode found, ino=");
+    early_puthex(inode->ino);
+    early_puts("\n");
 
     mnt = vfs_find_mount(path);
     if (mnt == NULL || mnt->ops->readdir == NULL) {
+        early_puts("[vfs_readdir] no mount or readdir\n");
         return -1;
     }
 
-    return mnt->ops->readdir(inode, entries, count);
+    early_puts("[vfs_readdir] calling ramfs_readdir\n");
+    result = mnt->ops->readdir(inode, entries, count);
+    early_puts("[vfs_readdir] result=");
+    early_puthex(result);
+    early_puts("\n");
+
+    return result;
 }
 
 /* Create a new file */
