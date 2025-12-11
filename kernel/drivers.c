@@ -39,7 +39,7 @@ void drivers_init(void)
     /* Mount root filesystem (ramfs) */
     vfs_mount("none", "/", "ramfs");
 
-    /* Mount devfs on /dev - temporarily disabled for debugging */
+    /* Mount devfs on /dev - disabled due to hang issue */
     /* vfs_mount("none", "/dev", "devfs"); */
 
     /* TODO: Initialize other drivers */

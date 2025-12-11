@@ -204,18 +204,14 @@ int uart_haschar(void)
 /* Get character (blocking) */
 char uart_getchar(void)
 {
-    volatile unsigned int lsr;
     char ch;
 
-    /* Check LSR once per call - no tight loop */
-    lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);
-    if (lsr & 0x01) {
-        /* Data ready - read it */
-        ch = uart_read_reg(BOARD_UART_BASE, UART_RBR) & 0xFF;
-        return ch;
-    }
-    /* No data available - return null character */
-    return '\0';
+    /* WORKAROUND: Skip LSR check - directly try to read RBR
+     * Reading LSR causes system hang on QEMU
+     * Just try to read RBR - it will return 0 if no data
+     */
+    ch = uart_read_reg(BOARD_UART_BASE, UART_RBR) & 0xFF;
+    return ch;
 }
 
 /* Get character (non-blocking) */
