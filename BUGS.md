@@ -1,9 +1,9 @@
-# Stage 2 Bug Tracking - 进程管理待修复问题
+# MinixRV64 Bug Tracking - 待修复问题
 
 **创建日期**: 2025-12-11
 **状态**: 活跃开发中
 
-本文档记录 Stage 2 进程管理实现中需要修复的 bug 和待完成的功能。
+本文档记录 MinixRV64 实现中需要修复的 bug 和待完成的功能。
 
 ---
 
@@ -40,19 +40,45 @@
 
 ---
 
-### BUG-003: Fork 缺少 Copy-on-Write
-**状态**: 🟡 框架存在
-**文件**: `kernel/fork.c`
-**描述**: fork 实现直接复制页面而非使用 COW 机制。
+### BUG-003: Fork 缺少 Copy-on-Write (COW)
+**状态**: 🔴 未实现
+**文件**: `kernel/fork.c`, `arch/riscv64/mm/pgtable.c`
+**描述**: fork 实现只做了浅拷贝，没有实现 COW 机制。当前 `copy_mm()` 不复制页表。
 **影响**:
+- 子进程没有独立的地址空间
 - 内存使用效率低
 - 大进程 fork 非常慢
 - 可能耗尽物理内存
-**待实现**:
-1. 页表项添加只读标记
-2. 实现页面错误处理器
-3. 在写时复制页面并更新 PTE
-4. 引用计数管理
+
+**当前代码问题** (`kernel/fork.c:359-363`):
+```c
+/* TODO: Allocate new page table and implement COW */
+/* For now, we don't copy page tables */
+mm->pgd = NULL;    // ❌ 没有复制页表！
+mm->mmap = NULL;   // ❌ 没有复制VMA！
+```
+
+**COW 实现检查清单**:
+| 检查项 | 状态 | 说明 |
+|--------|------|------|
+| TLB一致性：修改页表后 flush_tlb_mm | 🔴 未实现 | 需要在设置只读后刷新 TLB |
+| 原子性：pte_wrprotect/set_pte 关中断 | 🔴 未实现 | 防止时钟中断调度 |
+| 引用计数：get_page 在 set_pte 之前 | 🔴 未实现 | 需要页面引用计数 |
+| 错误路径：alloc_page 失败回退 | 🔴 未实现 | 需要回退已复制的 PTE |
+| NULL检查：pte_offset 返回检查 pte_none | 🔴 未实现 | walk_pgtable 有检查但 COW 未使用 |
+| 页大小统一：只处理 4KB 页 | ⚠️ 需注意 | 2MB/1GB 大页需直接复制，不能 COW |
+
+**缺失的关键函数** (声明在 `mm_types.h` 但未实现):
+- `copy_page_range()` - 复制页表范围并设置 COW
+- `do_cow_fault()` - 处理 COW 页面错误
+- `dup_mm()` - 完整复制 mm_struct
+
+**待实现步骤**:
+1. **页表复制** - `copy_page_range()` 遍历 VMA 并复制 PTE
+2. **写保护设置** - 清除父子进程的 PTE_W 位
+3. **页面引用计数** - `struct page` 添加 `_mapcount` 字段
+4. **页面错误处理** - `do_cow_fault()` 在写时复制页面
+5. **TLB 刷新** - 修改 PTE 后调用 `sfence.vma`
 
 ---
 
@@ -204,6 +230,7 @@
 - [ ] 孤儿进程收养
 - [ ] ELF 加载执行
 - [ ] 用户态程序运行
+- [ ] COW 页面错误处理
 
 ---
 
@@ -213,7 +240,7 @@
 |--------|------|--------|------|----------|
 | BUG-001 | kmalloc 问题 | 高 | 🔴 | Stage 3 |
 | BUG-002 | 调度器集成 | 高 | 🟡 | Stage 2.5 |
-| BUG-003 | COW Fork | 高 | 🟡 | Stage 3 |
+| BUG-003 | COW Fork | 高 | 🔴 | Stage 3 |
 | BUG-004 | ELF+VFS | 中 | 🟡 | Stage 3 |
 | BUG-005 | 用户态返回 | 中 | 🟡 | Stage 4 |
 | BUG-006 | 僵尸回收 | 中 | 🟡 | Stage 2.5 |

@@ -88,7 +88,7 @@ MinixRV64/
 - [x] 上下文切换汇编 (ret_from_fork, ret_to_user)
 - [x] Linux ABI系统调用更新
 
-详见: [STAGE2_BUGS.md](STAGE2_BUGS.md) - Stage 2待修复问题
+详见: [BUGS.md](BUGS.md) - 待修复问题清单
 
 ### Stage 3: 内存管理完善 (计划中)
 - 修复kmalloc/slab allocator
@@ -176,7 +176,7 @@ make gdb         # 终端2: 启动GDB并连接
 ## 文档
 
 ### 核心文档
-- **[STAGE2_BUGS.md](STAGE2_BUGS.md)** - Stage 2待修复问题清单
+- **[BUGS.md](BUGS.md)** - 待修复问题清单
 - **[HowToFitPosix.md](HowToFitPosix.md)** - 完整的POSIX实现路线图
 - [CLAUDE.md](CLAUDE.md) - 开发者指南
 - [QUICK_START.md](QUICK_START.md) - 快速开始指南

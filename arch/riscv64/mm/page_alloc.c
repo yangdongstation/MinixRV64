@@ -341,6 +341,15 @@ void page_init(void)
     /* Add remaining pages to buddy system */
     /* Start from first page after mem_map, aligned to max order */
     pfn = start_pfn + mem_map_pages;
+
+    /* Ensure starting pfn is at least 2-page aligned for THREAD_SIZE allocations */
+    /* This guarantees alloc_pages(1) returns 8KB-aligned addresses */
+    if (pfn & 1) {
+        struct page *page = pfn_to_page(pfn);
+        page->flags = PG_RESERVED;  /* Mark unaligned page as reserved */
+        pfn++;
+    }
+
     free_page_count = 0;
 
     /* Add pages in largest possible chunks */
