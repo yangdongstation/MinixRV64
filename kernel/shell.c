@@ -18,10 +18,46 @@ extern int uart_haschar(void);
 /* String functions */
 extern int strcmp(const char *s1, const char *s2);
 extern char *strncpy(char *dest, const char *src, unsigned long n);
+extern unsigned long strlen(const char *s);
+
+/* VFS functions */
+extern int vfs_open(const char *path, int flags);
+extern int vfs_close(int fd);
+extern long vfs_read(int fd, void *buf, unsigned long count);
+extern long vfs_write(int fd, const void *buf, unsigned long count);
+extern int vfs_mkdir(const char *path, int mode);
+extern int vfs_readdir(const char *path, void *dirents, int count);
+extern int vfs_mount(const char *device, const char *mount_point, const char *fstype);
+
+/* VFS dirent structure - must match vfs.h */
+struct vfs_dirent {
+    unsigned long ino;
+    unsigned short reclen;
+    unsigned char type;
+    char name[256];
+};
 
 /* Command buffer */
 static char cmd_buffer[SHELL_MAX_CMD_LEN];
 static int cmd_pos = 0;
+
+/* Forward declarations for command functions */
+int cmd_help(int argc, char **argv);
+int cmd_clear(int argc, char **argv);
+int cmd_echo(int argc, char **argv);
+int cmd_ls(int argc, char **argv);
+int cmd_cat(int argc, char **argv);
+int cmd_pwd(int argc, char **argv);
+int cmd_cd(int argc, char **argv);
+int cmd_mkdir(int argc, char **argv);
+int cmd_touch(int argc, char **argv);
+int cmd_write(int argc, char **argv);
+int cmd_rm(int argc, char **argv);
+int cmd_mount(int argc, char **argv);
+int cmd_ps(int argc, char **argv);
+int cmd_kill(int argc, char **argv);
+int cmd_reboot(int argc, char **argv);
+int cmd_uname(int argc, char **argv);
 
 /* Command table */
 static struct shell_cmd commands[] = {
@@ -33,7 +69,10 @@ static struct shell_cmd commands[] = {
     {"pwd", "Print working directory", cmd_pwd},
     {"cd", "Change directory", cmd_cd},
     {"mkdir", "Create directory", cmd_mkdir},
+    {"touch", "Create empty file", cmd_touch},
+    {"write", "Write text to file", cmd_write},
     {"rm", "Remove file", cmd_rm},
+    {"mount", "Mount filesystem", cmd_mount},
     {"ps", "List processes", cmd_ps},
     {"kill", "Kill process", cmd_kill},
     {"reboot", "Reboot system", cmd_reboot},
@@ -203,19 +242,64 @@ int cmd_echo(int argc, char **argv)
 
 int cmd_ls(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    struct vfs_dirent dirents[32];
+    const char *path = "/";
+    int count, i;
 
-    early_puts("ls: filesystem not yet mounted\n");
+    /* Use provided path or default to "/" */
+    if (argc >= 2) {
+        path = argv[1];
+    }
+
+    /* Read directory */
+    count = vfs_readdir(path, dirents, 32);
+    if (count < 0) {
+        early_puts("ls: cannot access '");
+        early_puts(path);
+        early_puts("'\n");
+        return -1;
+    }
+
+    /* Print entries */
+    if (count == 0) {
+        early_puts("(empty directory)\n");
+    } else {
+        for (i = 0; i < count; i++) {
+            early_puts(dirents[i].name);
+            early_puts("\n");
+        }
+    }
+
     return 0;
 }
 
 int cmd_cat(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    char buffer[256];
+    int fd;
+    long bytes_read;
 
-    early_puts("cat: filesystem not yet mounted\n");
+    if (argc < 2) {
+        early_puts("Usage: cat <file>\n");
+        return -1;
+    }
+
+    /* Open file */
+    fd = vfs_open(argv[1], 0);  /* O_RDONLY = 0 */
+    if (fd < 0) {
+        early_puts("cat: cannot open '");
+        early_puts(argv[1]);
+        early_puts("'\n");
+        return -1;
+    }
+
+    /* Read and print file contents */
+    while ((bytes_read = vfs_read(fd, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[bytes_read] = '\0';
+        early_puts(buffer);
+    }
+
+    vfs_close(fd);
     return 0;
 }
 
@@ -239,10 +323,111 @@ int cmd_cd(int argc, char **argv)
 
 int cmd_mkdir(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    if (argc < 2) {
+        early_puts("Usage: mkdir <directory>\n");
+        return -1;
+    }
 
-    early_puts("mkdir: filesystem not yet mounted\n");
+    if (vfs_mkdir(argv[1], 0755) < 0) {
+        early_puts("mkdir: cannot create directory '");
+        early_puts(argv[1]);
+        early_puts("'\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+int cmd_touch(int argc, char **argv)
+{
+    int fd;
+
+    if (argc < 2) {
+        early_puts("Usage: touch <file>\n");
+        return -1;
+    }
+
+    /* Create file with O_CREAT | O_WRONLY = 0x101 */
+    fd = vfs_open(argv[1], 0x101);
+    if (fd < 0) {
+        early_puts("touch: cannot create '");
+        early_puts(argv[1]);
+        early_puts("'\n");
+        return -1;
+    }
+
+    vfs_close(fd);
+    return 0;
+}
+
+int cmd_write(int argc, char **argv)
+{
+    char buffer[512];
+    int fd, i;
+    unsigned long pos = 0;
+    unsigned long len;
+
+    if (argc < 3) {
+        early_puts("Usage: write <file> <text...>\n");
+        return -1;
+    }
+
+    /* Concatenate all arguments starting from argv[2] */
+    for (i = 2; i < argc && pos < sizeof(buffer) - 2; i++) {
+        const char *arg = argv[i];
+        unsigned long j;
+
+        /* Copy argument */
+        for (j = 0; arg[j] != '\0' && pos < sizeof(buffer) - 2; j++) {
+            buffer[pos++] = arg[j];
+        }
+
+        /* Add space between arguments */
+        if (i < argc - 1) {
+            buffer[pos++] = ' ';
+        }
+    }
+    buffer[pos++] = '\n';
+    buffer[pos] = '\0';
+
+    /* Open file for writing (O_CREAT | O_WRONLY | O_TRUNC = 0x301) */
+    fd = vfs_open(argv[1], 0x301);
+    if (fd < 0) {
+        early_puts("write: cannot open '");
+        early_puts(argv[1]);
+        early_puts("'\n");
+        return -1;
+    }
+
+    /* Write buffer to file */
+    len = strlen(buffer);
+    if (vfs_write(fd, buffer, len) < 0) {
+        early_puts("write: write failed\n");
+        vfs_close(fd);
+        return -1;
+    }
+
+    vfs_close(fd);
+    return 0;
+}
+
+int cmd_mount(int argc, char **argv)
+{
+    if (argc < 4) {
+        early_puts("Usage: mount <device> <mount_point> <fstype>\n");
+        return -1;
+    }
+
+    if (vfs_mount(argv[1], argv[2], argv[3]) < 0) {
+        early_puts("mount: mount failed\n");
+        return -1;
+    }
+
+    early_puts("Mounted ");
+    early_puts(argv[3]);
+    early_puts(" on ");
+    early_puts(argv[2]);
+    early_puts("\n");
     return 0;
 }
 
@@ -251,7 +436,7 @@ int cmd_rm(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    early_puts("rm: filesystem not yet mounted\n");
+    early_puts("rm: not implemented yet\n");
     return 0;
 }
 

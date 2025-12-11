@@ -508,15 +508,23 @@ int vfs_mkdir(const char *path, u32 mode)
     const char *p, *last_slash;
     char *q;
     inode_t *parent_inode;
+    int result;
 
     if (path == NULL) {
         return -1;
     }
 
+    early_puts("[vfs_mkdir] Starting mkdir for: ");
+    early_puts(path);
+    early_puts("\n");
+
     mnt = vfs_find_mount(path);
     if (mnt == NULL || mnt->ops->mkdir == NULL) {
+        early_puts("[vfs_mkdir] No mount or mkdir op\n");
         return -1;
     }
+
+    early_puts("[vfs_mkdir] Mount found\n");
 
     /* Find parent directory path and directory name */
     last_slash = NULL;
@@ -528,6 +536,7 @@ int vfs_mkdir(const char *path, u32 mode)
 
     if (last_slash == NULL || last_slash == path) {
         /* No parent or root parent */
+        early_puts("[vfs_mkdir] Using root as parent\n");
         parent_inode = mnt->root;
         p = path;
         while (*p == '/') p++;
@@ -538,6 +547,7 @@ int vfs_mkdir(const char *path, u32 mode)
         *q = '\0';
     } else {
         /* Copy parent path */
+        early_puts("[vfs_mkdir] Looking up parent\n");
         p = path;
         q = parent_path;
         while (p < last_slash && q < parent_path + sizeof(parent_path) - 1) {
@@ -554,13 +564,27 @@ int vfs_mkdir(const char *path, u32 mode)
         *q = '\0';
 
         /* Lookup parent directory */
+        early_puts("[vfs_mkdir] Calling vfs_lookup_path for: ");
+        early_puts(parent_path);
+        early_puts("\n");
         parent_inode = vfs_lookup_path(parent_path);
         if (parent_inode == NULL) {
+            early_puts("[vfs_mkdir] Parent not found\n");
             return -1;
         }
     }
 
-    return mnt->ops->mkdir(parent_inode, dir_name, mode);
+    early_puts("[vfs_mkdir] Calling ramfs mkdir for: ");
+    early_puts(dir_name);
+    early_puts("\n");
+    result = mnt->ops->mkdir(parent_inode, dir_name, mode);
+    early_puts("[vfs_mkdir] mkdir returned: ");
+    if (result == 0) {
+        early_puts("SUCCESS\n");
+    } else {
+        early_puts("FAILED\n");
+    }
+    return result;
 }
 
 /* Remove directory */

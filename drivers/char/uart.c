@@ -204,14 +204,25 @@ int uart_haschar(void)
 /* Get character (blocking) */
 char uart_getchar(void)
 {
-    char ch;
+    static unsigned char last_read = 0xFF;  /* Use 0xFF as initial invalid value */
+    unsigned char ch;
 
     /* WORKAROUND: Skip LSR check - directly try to read RBR
      * Reading LSR causes system hang on QEMU
-     * Just try to read RBR - it will return 0 if no data
+     *
+     * The RBR register holds the last received character until a new one arrives.
+     * We filter out repeated reads by only returning when the value changes.
      */
     ch = uart_read_reg(BOARD_UART_BASE, UART_RBR) & 0xFF;
-    return ch;
+
+    /* Only return if character changed from last read */
+    if (ch != last_read) {
+        last_read = ch;
+        return (char)ch;
+    }
+
+    /* Same character as before - no new data */
+    return '\0';
 }
 
 /* Get character (non-blocking) */

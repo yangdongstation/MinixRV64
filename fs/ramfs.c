@@ -284,16 +284,26 @@ static int ramfs_mkdir(inode_t *parent, const char *name, u32 mode)
     ramfs_file_t *parent_file, *file;
     inode_t *inode;
 
+    early_puts("[ramfs_mkdir] Starting for: ");
+    early_puts(name);
+    early_puts("\n");
+
     if (ramfs_state.file_count >= RAMFS_MAX_FILES) {
+        early_puts("[ramfs_mkdir] Max files reached\n");
         return -1;
     }
 
+    early_puts("[ramfs_mkdir] Getting parent fs_private\n");
     parent_file = (ramfs_file_t *)parent->fs_private;
 
     /* Check if already exists */
+    early_puts("[ramfs_mkdir] Checking if exists\n");
     if (ramfs_find_file(parent_file, name) != NULL) {
+        early_puts("[ramfs_mkdir] Already exists\n");
         return -1;
     }
+
+    early_puts("[ramfs_mkdir] Allocating file slot\n");
 
     file = &ramfs_state.files[ramfs_state.file_count];
 
@@ -316,11 +326,14 @@ static int ramfs_mkdir(inode_t *parent, const char *name, u32 mode)
     file->next = NULL;
 
     /* Create inode */
+    early_puts("[ramfs_mkdir] Calling kmalloc for inode\n");
     inode = (inode_t *)kmalloc(sizeof(inode_t));
     if (inode == NULL) {
+        early_puts("[ramfs_mkdir] kmalloc failed\n");
         return -1;
     }
 
+    early_puts("[ramfs_mkdir] Initializing inode\n");
     inode->ino = file->ino;
     inode->mode = file->mode;
     inode->nlink = 2;
@@ -336,6 +349,7 @@ static int ramfs_mkdir(inode_t *parent, const char *name, u32 mode)
     ramfs_state.file_count++;
     parent->nlink++;
 
+    early_puts("[ramfs_mkdir] Success!\n");
     return 0;
 }
 
