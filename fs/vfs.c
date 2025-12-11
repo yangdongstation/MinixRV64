@@ -472,7 +472,8 @@ ssize_t vfs_read(file_t *file, void *buf, size_t count)
         return -1;
     }
 
-    mount_point_t *mnt = vfs_find_mount("");
+    /* Use root path to find mount - all files are under some mount point */
+    mount_point_t *mnt = vfs_find_mount("/");
     if (mnt == NULL || mnt->ops->read == NULL) {
         return -1;
     }
@@ -496,7 +497,8 @@ ssize_t vfs_write(file_t *file, const void *buf, size_t count)
     }
 
     early_puts("[vfs_write] Finding mount\n");
-    mount_point_t *mnt = vfs_find_mount("");
+    /* Use root path to find mount - all files are under some mount point */
+    mount_point_t *mnt = vfs_find_mount("/");
     if (mnt == NULL || mnt->ops->write == NULL) {
         early_puts("[vfs_write] No mount or write op\n");
         return -1;
