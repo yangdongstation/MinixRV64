@@ -47,12 +47,15 @@ C_SRCS = $(ARCH_DIR)/kernel/main.c \
          $(ARCH_DIR)/mm/pgtable.c \
          $(ARCH_DIR)/mm/slab.c \
          $(ARCH_DIR)/mm/vmalloc.c \
-         $(KERNEL_DIR)/sched.c \
+         $(KERNEL_DIR)/sched_new.c \
+         $(KERNEL_DIR)/fork.c \
+         $(KERNEL_DIR)/exit.c \
+         $(KERNEL_DIR)/exec.c \
+         $(KERNEL_DIR)/init_proc.c \
          $(KERNEL_DIR)/syscalls.c \
          $(KERNEL_DIR)/board.c \
          $(KERNEL_DIR)/drivers.c \
          $(KERNEL_DIR)/shell.c \
-         $(KERNEL_DIR)/proc.c \
          $(LIB_DIR)/printk.c \
          $(LIB_DIR)/string.c \
          $(DRIVER_DIR)/char/uart.c \

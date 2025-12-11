@@ -289,334 +289,1828 @@
   3. demand paging和COW待阶段2实现
 
   ---
-  阶段2：进程管理实现（3-4个月）← 下一步
+  阶段2：进程管理实现（3-4个月）← 当前阶段
 
-  当前问题
+  ═══════════════════════════════════════════════════════════════
+  概述
+  ═══════════════════════════════════════════════════════════════
 
+  当前问题：
   - ❌ 没有真正的进程
   - ❌ 没有进程调度
   - ❌ 没有上下文切换
+  - ❌ 没有用户态/内核态分离
 
-  任务2.1：设计进程数据结构（1周）
+  目标：
+  - ✅ 实现完整的进程抽象
+  - ✅ 支持 fork/exec/wait/exit
+  - ✅ 实现抢占式调度
+  - ✅ 用户态程序可以运行
+
+  进程状态机：
+
+  ┌─────────┐  fork()   ┌─────────┐
+  │  NEW    │─────────→│  READY  │←────────────────┐
+  └─────────┘          └────┬────┘                 │
+                            │                      │
+                       调度 │                      │ I/O完成
+                            ↓                      │ 时间片到
+                       ┌─────────┐                 │
+                       │ RUNNING │─────────────────┤
+                       └────┬────┘                 │
+                            │                      │
+              exit()        │        I/O等待       │
+                ↓           │           ↓          │
+           ┌─────────┐      │      ┌─────────┐    │
+           │ ZOMBIE  │      │      │ BLOCKED │────┘
+           └─────────┘      │      └─────────┘
+                            │
+              wait()        │
+                ↓           │
+           ┌─────────┐      │
+           │  DEAD   │←─────┘
+           └─────────┘
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.1：进程数据结构设计（1周）
+  ═══════════════════════════════════════════════════════════════
 
   /* include/minix/sched.h */
 
+  // 进程状态
+  #define TASK_RUNNING        0   // 可运行（就绪或运行中）
+  #define TASK_INTERRUPTIBLE  1   // 可中断睡眠
+  #define TASK_UNINTERRUPTIBLE 2  // 不可中断睡眠
+  #define TASK_ZOMBIE         4   // 僵尸进程
+  #define TASK_STOPPED        8   // 已停止
+
+  // 进程标志
+  #define PF_KTHREAD          0x00000001  // 内核线程
+  #define PF_EXITING          0x00000004  // 正在退出
+  #define PF_FORKNOEXEC       0x00000040  // fork后未exec
+
+  // 调度策略
+  #define SCHED_NORMAL        0   // 普通时间片轮转
+  #define SCHED_FIFO          1   // 实时先进先出
+  #define SCHED_RR            2   // 实时轮转
+
+  // 进程优先级
+  #define MAX_PRIO            140
+  #define DEFAULT_PRIO        120
+  #define MAX_USER_PRIO       100
+  #define MAX_RT_PRIO         100
+
+  // 时间片（tick数）
+  #define DEF_TIMESLICE       10  // 默认10个tick
+  #define MIN_TIMESLICE       1
+  #define MAX_TIMESLICE       100
+
+  地址空间结构：
+
+  /* include/minix/mm_types.h */
+
   struct mm_struct {
-      pgd_t *pgd;                    // 页表
+      pgd_t *pgd;                     // 页全局目录（页表根）
+
+      // 代码段
       unsigned long start_code;       // 代码段起始
-      unsigned long end_code;
+      unsigned long end_code;         // 代码段结束
+
+      // 数据段
       unsigned long start_data;       // 数据段起始
-      unsigned long end_data;
+      unsigned long end_data;         // 数据段结束
+
+      // 堆
       unsigned long start_brk;        // 堆起始
-      unsigned long brk;              // 堆当前位置
-      unsigned long start_stack;      // 栈起始
-      struct vm_area_struct *mmap;    // VMA链表
+      unsigned long brk;              // 堆当前位置（通过brk系统调用调整）
+
+      // 栈
+      unsigned long start_stack;      // 栈起始（高地址）
+      unsigned long arg_start;        // 参数区起始
+      unsigned long arg_end;          // 参数区结束
+      unsigned long env_start;        // 环境变量区起始
+      unsigned long env_end;          // 环境变量区结束
+
+      // VMA 管理
+      struct vm_area_struct *mmap;    // VMA链表头
+      struct rb_root mm_rb;           // VMA红黑树（加速查找）
       int map_count;                  // VMA数量
+      unsigned long total_vm;         // 总虚拟内存大小（页数）
+      unsigned long locked_vm;        // 锁定的内存
+      unsigned long data_vm;          // 数据段大小
+      unsigned long exec_vm;          // 可执行段大小
+      unsigned long stack_vm;         // 栈大小
+
+      // 引用计数
+      atomic_t mm_users;              // 使用此mm的进程数
+      atomic_t mm_count;              // 引用计数
+
+      spinlock_t page_table_lock;     // 保护页表
+      struct rw_semaphore mmap_sem;   // 保护mmap操作
+
+      // 用于exec
+      unsigned long saved_auxv[AT_VECTOR_SIZE];  // 保存的auxv
   };
+
+  VMA（虚拟内存区域）结构：
 
   struct vm_area_struct {
-      unsigned long vm_start;         // 区域起始地址
-      unsigned long vm_end;           // 区域结束地址
-      unsigned long vm_flags;         // 权限标志
-      struct vm_area_struct *vm_next;
-      struct file *vm_file;           // 关联的文件（mmap）
+      unsigned long vm_start;         // 区域起始地址（包含）
+      unsigned long vm_end;           // 区域结束地址（不包含）
+      struct vm_area_struct *vm_next; // 链表下一个
+      struct vm_area_struct *vm_prev; // 链表上一个
+      struct rb_node vm_rb;           // 红黑树节点
+
+      unsigned long vm_flags;         // 权限和属性标志
+      // VM_READ, VM_WRITE, VM_EXEC, VM_SHARED, VM_GROWSDOWN（栈）
+
+      pgprot_t vm_page_prot;          // 页保护位
+
+      // 文件映射
+      struct file *vm_file;           // 映射的文件（匿名映射为NULL）
+      unsigned long vm_pgoff;         // 文件内偏移（页单位）
+
+      // 操作函数
+      const struct vm_operations_struct *vm_ops;
+
+      // 私有数据
+      void *vm_private_data;
   };
+
+  // VMA标志
+  #define VM_READ         0x00000001
+  #define VM_WRITE        0x00000002
+  #define VM_EXEC         0x00000004
+  #define VM_SHARED       0x00000008
+  #define VM_MAYREAD      0x00000010
+  #define VM_MAYWRITE     0x00000020
+  #define VM_MAYEXEC      0x00000040
+  #define VM_GROWSDOWN    0x00000100  // 栈向下增长
+  #define VM_DENYWRITE    0x00000800
+  #define VM_LOCKED       0x00002000
+  #define VM_STACK        0x00000100
+
+  进程控制块（PCB）：
 
   struct task_struct {
-      // 进程状态
-      volatile long state;            // TASK_RUNNING, TASK_INTERRUPTIBLE等
-      pid_t pid;
+      // ========== 调度相关 ==========
+      volatile long state;            // 进程状态
+      unsigned int flags;             // 进程标志
+      int on_rq;                      // 是否在运行队列
+
+      int prio;                       // 动态优先级
+      int static_prio;                // 静态优先级
+      int normal_prio;                // 普通优先级
+      unsigned int rt_priority;       // 实时优先级
+      unsigned int policy;            // 调度策略
+
+      struct sched_entity se;         // 调度实体
+      unsigned long time_slice;       // 剩余时间片
+      unsigned long utime, stime;     // 用户态/内核态CPU时间
+      unsigned long nvcsw, nivcsw;    // 自愿/非自愿上下文切换次数
+
+      // ========== 进程标识 ==========
+      pid_t pid;                      // 进程ID
+      pid_t tgid;                     // 线程组ID（主线程的pid）
       pid_t ppid;                     // 父进程PID
 
-      // 调度信息
-      int prio;                       // 优先级
-      unsigned long time_slice;       // 时间片
-      unsigned long utime, stime;     // 用户态/内核态时间
+      // ========== 内存管理 ==========
+      struct mm_struct *mm;           // 用户空间内存描述符
+      struct mm_struct *active_mm;    // 内核线程借用的mm
 
-      // 内存管理
-      struct mm_struct *mm;
-
-      // 文件系统
-      struct fs_struct *fs;           // 文件系统信息
+      // ========== 文件系统 ==========
+      struct fs_struct *fs;           // 文件系统信息（cwd, root）
       struct files_struct *files;     // 打开文件表
 
-      // 信号
-      struct signal_struct *signal;
+      // ========== 信号 ==========
+      struct signal_struct *signal;   // 共享信号处理
+      struct sighand_struct *sighand; // 信号处理函数
       sigset_t blocked;               // 阻塞的信号
+      sigset_t real_blocked;
+      struct sigpending pending;      // 待处理信号
 
-      // 寄存器上下文
-      struct pt_regs *regs;           // 保存的寄存器
+      // ========== 寄存器上下文 ==========
+      struct thread_struct thread;    // CPU相关上下文
       unsigned long kernel_sp;        // 内核栈指针
+      unsigned long user_sp;          // 用户栈指针
 
-      // 进程关系
-      struct task_struct *parent;
-      struct list_head children;
-      struct list_head sibling;
+      // ========== 进程关系 ==========
+      struct task_struct *parent;     // 父进程
+      struct task_struct *real_parent;// 真正的父进程
+      struct list_head children;      // 子进程链表
+      struct list_head sibling;       // 兄弟进程链表
 
-      // 等待队列
-      wait_queue_head_t wait_child;
+      // ========== 进程组和会话 ==========
+      pid_t pgrp;                     // 进程组ID
+      pid_t session;                  // 会话ID
+      struct task_struct *group_leader;// 线程组leader
 
-      // 退出状态
-      int exit_code;
+      // ========== 等待 ==========
+      wait_queue_head_t wait_chldexit;// 等待子进程退出
+      int exit_code;                  // 退出码
+      int exit_signal;                // 退出时发送给父进程的信号
 
-      // 调度链表
-      struct list_head run_list;
+      // ========== 时间 ==========
+      u64 start_time;                 // 启动时间
+      u64 real_start_time;            // 单调启动时间
+
+      // ========== 命令行 ==========
+      char comm[16];                  // 可执行文件名
+
+      // ========== 链表 ==========
+      struct list_head tasks;         // 所有进程链表
+      struct list_head run_list;      // 运行队列链表
   };
 
-  任务2.2：实现进程创建（2周）
+  // 内核线程信息（架构相关）
+  struct thread_struct {
+      // RISC-V 架构
+      unsigned long ra;               // 返回地址
+      unsigned long sp;               // 栈指针
+      unsigned long s[12];            // s0-s11 callee-saved寄存器
+      unsigned long sepc;             // 异常PC
+      unsigned long sstatus;          // 状态寄存器
+  };
 
-  步骤：
+  // 调度实体（用于CFS调度器）
+  struct sched_entity {
+      struct rb_node run_node;        // 红黑树节点
+      unsigned int on_rq;             // 是否在队列
+      u64 vruntime;                   // 虚拟运行时间
+      u64 sum_exec_runtime;           // 总执行时间
+      u64 prev_sum_exec_runtime;
+  };
 
-  1. 实现copy_process()
+  ═══════════════════════════════════════════════════════════════
+  任务2.2：内核栈和进程分配（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  内核栈布局：
+
+  每个进程有独立的内核栈（2页 = 8KB）：
+
+  高地址
+  ┌─────────────────────────────────┐ ← 栈顶 + THREAD_SIZE
+  │         struct pt_regs          │   (trap时保存的寄存器)
+  ├─────────────────────────────────┤
+  │                                 │
+  │         内核栈空间              │   (函数调用栈)
+  │              ↓                  │
+  │                                 │
+  ├─────────────────────────────────┤
+  │      struct thread_info         │   (线程信息)
+  └─────────────────────────────────┘ ← 栈底
+  低地址
+
+  /* include/minix/thread_info.h */
+
+  #define THREAD_SIZE     (2 * PAGE_SIZE)  // 8KB
+  #define THREAD_MASK     (~(THREAD_SIZE - 1))
+
+  struct thread_info {
+      struct task_struct *task;       // 指向task_struct
+      unsigned long flags;            // 线程标志
+      int preempt_count;              // 抢占计数
+      int cpu;                        // 当前CPU
+      mm_segment_t addr_limit;        // 地址空间限制
+  };
+
+  // 线程标志
+  #define TIF_SIGPENDING      0       // 有待处理信号
+  #define TIF_NEED_RESCHED    1       // 需要重新调度
+  #define TIF_SYSCALL_TRACE   2       // 系统调用跟踪
+
+  // 获取当前thread_info（通过栈指针）
+  static inline struct thread_info *current_thread_info(void)
+  {
+      unsigned long sp;
+      asm volatile ("mv %0, sp" : "=r"(sp));
+      return (struct thread_info *)(sp & THREAD_MASK);
+  }
+
+  // 获取当前进程
+  #define current (current_thread_info()->task)
+
+  进程分配实现：
+
   /* kernel/fork.c */
 
+  // 内核栈 + thread_info 分配
+  static struct thread_info *alloc_thread_info(void)
+  {
+      // 分配2页对齐的内存
+      struct page *page = alloc_pages(1);  // 2^1 = 2页
+      if (!page) return NULL;
+
+      struct thread_info *ti = page_address(page);
+      memset(ti, 0, sizeof(*ti));
+      ti->preempt_count = 0;
+
+      return ti;
+  }
+
+  // task_struct 分配（使用slab）
+  static struct kmem_cache *task_struct_cachep;
+
+  void __init fork_init(void)
+  {
+      task_struct_cachep = kmem_cache_create("task_struct",
+                                              sizeof(struct task_struct),
+                                              ARCH_MIN_TASKALIGN,
+                                              SLAB_PANIC, NULL);
+  }
+
+  static struct task_struct *alloc_task_struct(void)
+  {
+      return kmem_cache_alloc(task_struct_cachep, GFP_KERNEL);
+  }
+
+  static void free_task_struct(struct task_struct *tsk)
+  {
+      kmem_cache_free(task_struct_cachep, tsk);
+  }
+
+  // PID分配（简化版：使用位图）
+  #define PID_MAX     32768
+  static DECLARE_BITMAP(pid_bitmap, PID_MAX);
+  static spinlock_t pid_lock;
+  static pid_t last_pid = 0;
+
+  pid_t alloc_pid(void)
+  {
+      pid_t pid;
+
+      spin_lock(&pid_lock);
+      do {
+          last_pid++;
+          if (last_pid >= PID_MAX)
+              last_pid = 1;
+      } while (test_bit(last_pid, pid_bitmap));
+
+      set_bit(last_pid, pid_bitmap);
+      pid = last_pid;
+      spin_unlock(&pid_lock);
+
+      return pid;
+  }
+
+  void free_pid(pid_t pid)
+  {
+      spin_lock(&pid_lock);
+      clear_bit(pid, pid_bitmap);
+      spin_unlock(&pid_lock);
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.3：fork 实现 - Copy-On-Write（2周）
+  ═══════════════════════════════════════════════════════════════
+
+  fork 是 Unix 进程模型的核心。为了效率，使用 Copy-On-Write（COW）：
+
+  fork() 执行流程：
+
+  父进程                              子进程
+     │                                  │
+     │  fork() ──────────────────────→ 创建
+     │                                  │
+     │  返回 child_pid                  │  返回 0
+     │                                  │
+     ↓                                  ↓
+
+  COW 原理：
+
+  fork时：
+  ┌──────────────────┐      ┌──────────────────┐
+  │   父进程页表      │      │   子进程页表      │
+  │  VA → PA (R/O)   │      │  VA → PA (R/O)   │ ← 共享同一物理页
+  └──────────────────┘      └──────────────────┘
+            │                        │
+            └────────────┬───────────┘
+                         ↓
+               ┌──────────────────┐
+               │    物理页        │
+               │  refcount = 2    │
+               └──────────────────┘
+
+  写时：
+  ┌──────────────────┐      ┌──────────────────┐
+  │   父进程页表      │      │   子进程页表      │
+  │  VA → PA1 (R/W)  │      │  VA → PA2 (R/W)  │
+  └──────────────────┘      └──────────────────┘
+            │                        │
+            ↓                        ↓
+  ┌──────────────────┐      ┌──────────────────┐
+  │   物理页 PA1     │      │   物理页 PA2     │ ← 写时复制
+  │  refcount = 1    │      │  refcount = 1    │
+  └──────────────────┘      └──────────────────┘
+
+  实现代码：
+
+  /* kernel/fork.c */
+
+  // 复制进程
   struct task_struct *copy_process(unsigned long clone_flags,
+                                    unsigned long stack_start,
                                     struct pt_regs *regs)
   {
       struct task_struct *p;
+      struct thread_info *ti;
+      int retval;
 
       // 1. 分配task_struct
       p = alloc_task_struct();
-      if (!p) return NULL;
+      if (!p)
+          return ERR_PTR(-ENOMEM);
 
-      // 2. 复制父进程信息
+      // 2. 分配内核栈和thread_info
+      ti = alloc_thread_info();
+      if (!ti) {
+          free_task_struct(p);
+          return ERR_PTR(-ENOMEM);
+      }
+
+      // 3. 复制父进程基本信息
       *p = *current;
+      ti->task = p;
+      p->stack = ti;
+
+      // 4. 分配新PID
       p->pid = alloc_pid();
+      p->tgid = (clone_flags & CLONE_THREAD) ? current->tgid : p->pid;
       p->ppid = current->pid;
+
+      // 5. 初始化进程状态
       p->state = TASK_RUNNING;
+      p->flags &= ~PF_FORKNOEXEC;
+      p->flags |= PF_FORKNOEXEC;
 
-      // 3. 复制地址空间
-      if (!(clone_flags & CLONE_VM)) {
-          p->mm = copy_mm(current->mm);
-      } else {
-          p->mm = current->mm;  // 共享地址空间（线程）
-      }
+      // 6. 复制内存空间
+      retval = copy_mm(clone_flags, p);
+      if (retval)
+          goto bad_fork_cleanup;
 
-      // 4. 复制文件描述符表
-      if (!(clone_flags & CLONE_FILES)) {
-          p->files = copy_files(current->files);
-      }
+      // 7. 复制文件描述符表
+      retval = copy_files(clone_flags, p);
+      if (retval)
+          goto bad_fork_cleanup_mm;
 
-      // 5. 设置内核栈
-      p->kernel_sp = (unsigned long)p + TASK_SIZE - sizeof(struct pt_regs);
+      // 8. 复制文件系统信息
+      retval = copy_fs(clone_flags, p);
+      if (retval)
+          goto bad_fork_cleanup_files;
 
-      // 6. 复制寄存器
-      struct pt_regs *child_regs = (struct pt_regs *)p->kernel_sp;
-      *child_regs = *regs;
-      child_regs->a0 = 0;  // fork()子进程返回0
+      // 9. 复制信号处理
+      retval = copy_sighand(clone_flags, p);
+      if (retval)
+          goto bad_fork_cleanup_fs;
+
+      // 10. 复制CPU上下文
+      retval = copy_thread(clone_flags, stack_start, regs, p);
+      if (retval)
+          goto bad_fork_cleanup_sighand;
+
+      // 11. 初始化调度相关
+      p->time_slice = DEF_TIMESLICE;
+      p->prio = current->prio;
+      INIT_LIST_HEAD(&p->children);
+      INIT_LIST_HEAD(&p->sibling);
+
+      // 12. 建立父子关系
+      p->parent = current;
+      p->real_parent = current;
+      list_add_tail(&p->sibling, &current->children);
+
+      // 13. 添加到全局进程链表
+      list_add_tail(&p->tasks, &init_task.tasks);
 
       return p;
+
+  bad_fork_cleanup_sighand:
+      exit_sighand(p);
+  bad_fork_cleanup_fs:
+      exit_fs(p);
+  bad_fork_cleanup_files:
+      exit_files(p);
+  bad_fork_cleanup_mm:
+      exit_mm(p);
+  bad_fork_cleanup:
+      free_pid(p->pid);
+      free_thread_info(ti);
+      free_task_struct(p);
+      return ERR_PTR(retval);
   }
-  2. 实现do_fork()
-  long do_fork(unsigned long clone_flags, struct pt_regs *regs)
+
+  // 复制内存空间（COW实现）
+  static int copy_mm(unsigned long clone_flags, struct task_struct *p)
   {
-      struct task_struct *p;
+      struct mm_struct *mm, *oldmm;
 
-      p = copy_process(clone_flags, regs);
-      if (!p) return -ENOMEM;
+      oldmm = current->mm;
 
-      // 添加到就绪队列
-      wake_up_new_task(p);
+      // 内核线程没有用户空间
+      if (!oldmm) {
+          p->mm = NULL;
+          p->active_mm = NULL;
+          return 0;
+      }
 
-      return p->pid;
+      // CLONE_VM: 共享地址空间（线程）
+      if (clone_flags & CLONE_VM) {
+          atomic_inc(&oldmm->mm_users);
+          p->mm = oldmm;
+          p->active_mm = oldmm;
+          return 0;
+      }
+
+      // 创建新的mm_struct
+      mm = allocate_mm();
+      if (!mm)
+          return -ENOMEM;
+
+      // 复制mm内容
+      memcpy(mm, oldmm, sizeof(*mm));
+      atomic_set(&mm->mm_users, 1);
+      atomic_set(&mm->mm_count, 1);
+
+      // 分配新页表
+      mm->pgd = pgd_alloc(mm);
+      if (!mm->pgd) {
+          free_mm(mm);
+          return -ENOMEM;
+      }
+
+      // 复制所有VMA（使用COW）
+      if (dup_mmap(mm, oldmm) < 0) {
+          pgd_free(mm->pgd);
+          free_mm(mm);
+          return -ENOMEM;
+      }
+
+      p->mm = mm;
+      p->active_mm = mm;
+
+      return 0;
   }
-  3. 实现sys_fork()
+
+  // 复制VMA并设置COW
+  static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+  {
+      struct vm_area_struct *vma, *new_vma, **pprev;
+
+      pprev = &mm->mmap;
+
+      for (vma = oldmm->mmap; vma; vma = vma->vm_next) {
+          // 分配新VMA
+          new_vma = kmalloc(sizeof(*new_vma), GFP_KERNEL);
+          if (!new_vma)
+              return -ENOMEM;
+
+          // 复制VMA内容
+          *new_vma = *vma;
+          new_vma->vm_mm = mm;
+
+          // 复制页表项（设置为只读实现COW）
+          copy_page_range(mm, oldmm, new_vma);
+
+          // 链接到新mm
+          *pprev = new_vma;
+          pprev = &new_vma->vm_next;
+          mm->map_count++;
+      }
+
+      return 0;
+  }
+
+  // 复制页表范围（COW核心）
+  int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+                      struct vm_area_struct *vma)
+  {
+      unsigned long addr = vma->vm_start;
+      unsigned long end = vma->vm_end;
+
+      for (; addr < end; addr += PAGE_SIZE) {
+          pte_t *src_pte, *dst_pte;
+          pte_t pte;
+
+          src_pte = pte_offset(src_mm->pgd, addr);
+          if (pte_none(*src_pte))
+              continue;
+
+          // 获取目标PTE
+          dst_pte = pte_alloc(dst_mm->pgd, addr);
+          if (!dst_pte)
+              return -ENOMEM;
+
+          pte = *src_pte;
+
+          // 私有可写映射：设置为只读（COW）
+          if (is_cow_mapping(vma->vm_flags) && pte_write(pte)) {
+              // 清除写权限
+              pte = pte_wrprotect(pte);
+              set_pte(src_pte, pte);  // 父进程也变只读
+
+              // 增加页引用计数
+              struct page *page = pte_page(pte);
+              get_page(page);
+          }
+
+          // 复制PTE到子进程
+          set_pte(dst_pte, pte);
+      }
+
+      // 刷新TLB
+      flush_tlb_mm(src_mm);
+
+      return 0;
+  }
+
+  // COW页故障处理
+  int do_cow_fault(struct vm_area_struct *vma, unsigned long address,
+                   pte_t *page_table, pte_t orig_pte)
+  {
+      struct page *old_page, *new_page;
+      pte_t entry;
+
+      old_page = pte_page(orig_pte);
+
+      // 如果只有一个引用，直接设置为可写
+      if (page_count(old_page) == 1) {
+          entry = pte_mkwrite(orig_pte);
+          set_pte(page_table, entry);
+          flush_tlb_page(vma, address);
+          return 0;
+      }
+
+      // 分配新页
+      new_page = alloc_page(GFP_USER);
+      if (!new_page)
+          return -ENOMEM;
+
+      // 复制内容
+      copy_page(page_address(new_page), page_address(old_page));
+
+      // 更新页表
+      entry = mk_pte(new_page, vma->vm_page_prot);
+      entry = pte_mkwrite(entry);
+      entry = pte_mkdirty(entry);
+      set_pte(page_table, entry);
+
+      // 释放旧页引用
+      put_page(old_page);
+
+      flush_tlb_page(vma, address);
+
+      return 0;
+  }
+
+  // 复制线程上下文（RISC-V）
+  int copy_thread(unsigned long clone_flags, unsigned long usp,
+                  struct pt_regs *regs, struct task_struct *p)
+  {
+      struct pt_regs *childregs;
+      struct thread_struct *thread = &p->thread;
+
+      // 子进程的内核栈顶放pt_regs
+      childregs = task_pt_regs(p);
+      *childregs = *regs;
+
+      // fork返回0给子进程
+      childregs->a0 = 0;
+
+      // 如果指定了栈，使用新栈
+      if (usp)
+          childregs->sp = usp;
+
+      // 设置内核线程入口
+      thread->ra = (unsigned long)ret_from_fork;
+      thread->sp = (unsigned long)childregs;
+
+      // s0-s11将在switch_to时恢复
+      memset(thread->s, 0, sizeof(thread->s));
+
+      return 0;
+  }
+
+  // fork系统调用
   SYSCALL_DEFINE0(fork)
   {
       struct pt_regs *regs = current_pt_regs();
-      return do_fork(SIGCHLD, regs);
+      return do_fork(SIGCHLD, 0, regs);
   }
 
-  任务2.3：实现进程调度器（2周）
+  // vfork系统调用（子进程先运行，共享地址空间直到exec）
+  SYSCALL_DEFINE0(vfork)
+  {
+      struct pt_regs *regs = current_pt_regs();
+      return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, 0, regs);
+  }
 
-  采用简化版优先级调度（后续可升级为CFS）
+  // clone系统调用
+  SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
+                  int __user *, parent_tidptr, unsigned long, tls,
+                  int __user *, child_tidptr)
+  {
+      struct pt_regs *regs = current_pt_regs();
+      return do_fork(clone_flags, newsp, regs);
+  }
+
+  // do_fork主函数
+  long do_fork(unsigned long clone_flags, unsigned long stack_start,
+               struct pt_regs *regs)
+  {
+      struct task_struct *p;
+
+      p = copy_process(clone_flags, stack_start, regs);
+      if (IS_ERR(p))
+          return PTR_ERR(p);
+
+      // 唤醒新进程
+      wake_up_new_task(p);
+
+      // 如果是vfork，等待子进程exec或exit
+      if (clone_flags & CLONE_VFORK) {
+          wait_for_vfork_done(p);
+      }
+
+      return p->pid;
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.4：进程调度器实现（2周）
+  ═══════════════════════════════════════════════════════════════
+
+  采用简化版O(1)调度器（后续可升级为CFS）：
 
   /* kernel/sched.c */
 
+  // 运行队列（每CPU一个）
   struct rq {
       spinlock_t lock;
-      struct list_head run_queue;     // 就绪队列
-      unsigned long nr_running;
-      struct task_struct *curr;
+
+      unsigned long nr_running;       // 可运行进程数
+      unsigned long nr_switches;      // 上下文切换次数
+
+      struct task_struct *curr;       // 当前运行的进程
+      struct task_struct *idle;       // idle进程
+
+      // 优先级数组（O(1)调度）
+      struct prio_array *active;      // 活跃队列
+      struct prio_array *expired;     // 过期队列
+      struct prio_array arrays[2];
+
+      // 时钟
+      u64 clock;                      // 队列时钟
+      u64 clock_task;                 // 任务时钟
   };
 
+  // 优先级数组
+  #define MAX_PRIO    140
+  #define BITMAP_SIZE ((MAX_PRIO + BITS_PER_LONG - 1) / BITS_PER_LONG)
+
+  struct prio_array {
+      unsigned int nr_active;         // 活跃任务数
+      unsigned long bitmap[BITMAP_SIZE];  // 优先级位图
+      struct list_head queue[MAX_PRIO];   // 每个优先级一个队列
+  };
+
+  // 全局运行队列（单CPU简化版）
+  static struct rq runqueue;
+
+  // 初始化调度器
+  void __init sched_init(void)
+  {
+      struct rq *rq = &runqueue;
+      int i;
+
+      spin_lock_init(&rq->lock);
+      rq->nr_running = 0;
+      rq->nr_switches = 0;
+
+      // 初始化优先级数组
+      for (i = 0; i < 2; i++) {
+          struct prio_array *array = &rq->arrays[i];
+          int j;
+
+          array->nr_active = 0;
+          memset(array->bitmap, 0, sizeof(array->bitmap));
+          for (j = 0; j < MAX_PRIO; j++)
+              INIT_LIST_HEAD(&array->queue[j]);
+      }
+
+      rq->active = &rq->arrays[0];
+      rq->expired = &rq->arrays[1];
+
+      // 初始化idle进程（PID 0）
+      rq->idle = &init_task;
+      rq->curr = &init_task;
+  }
+
+  // 入队
+  static void enqueue_task(struct rq *rq, struct task_struct *p)
+  {
+      struct prio_array *array = rq->active;
+      int prio = p->prio;
+
+      list_add_tail(&p->run_list, &array->queue[prio]);
+      __set_bit(prio, array->bitmap);
+      array->nr_active++;
+      rq->nr_running++;
+      p->on_rq = 1;
+  }
+
+  // 出队
+  static void dequeue_task(struct rq *rq, struct task_struct *p)
+  {
+      struct prio_array *array = rq->active;
+      int prio = p->prio;
+
+      list_del(&p->run_list);
+      if (list_empty(&array->queue[prio]))
+          __clear_bit(prio, array->bitmap);
+      array->nr_active--;
+      rq->nr_running--;
+      p->on_rq = 0;
+  }
+
+  // 选择下一个任务
+  static struct task_struct *pick_next_task(struct rq *rq)
+  {
+      struct prio_array *array = rq->active;
+      struct task_struct *next;
+      int idx;
+
+      // 如果活跃队列为空，交换active和expired
+      if (unlikely(!array->nr_active)) {
+          rq->active = rq->expired;
+          rq->expired = array;
+          array = rq->active;
+      }
+
+      // 找到最高优先级（最小数值）
+      idx = find_first_bit(array->bitmap, MAX_PRIO);
+      if (idx >= MAX_PRIO)
+          return rq->idle;
+
+      // 取队首任务
+      next = list_first_entry(&array->queue[idx],
+                              struct task_struct, run_list);
+      return next;
+  }
+
+  // 定时器中断处理（每tick调用）
   void scheduler_tick(void)
   {
-      struct task_struct *curr = current;
+      struct rq *rq = &runqueue;
+      struct task_struct *curr = rq->curr;
+
+      spin_lock(&rq->lock);
+
+      // 更新时钟
+      rq->clock += TICK_NSEC;
+
+      // 更新进程时间统计
+      if (user_mode(get_irq_regs()))
+          curr->utime++;
+      else
+          curr->stime++;
 
       // 减少时间片
       if (curr->time_slice > 0)
           curr->time_slice--;
 
-      // 时间片用完，需要调度
+      // 时间片用完
       if (curr->time_slice == 0) {
-          curr->time_slice = DEFAULT_TIME_SLICE;
+          // 重新计算时间片
+          curr->time_slice = task_timeslice(curr);
+
+          // 移到expired队列
+          if (curr != rq->idle) {
+              dequeue_task(rq, curr);
+              // 添加到expired队列
+              struct prio_array *array = rq->expired;
+              list_add_tail(&curr->run_list, &array->queue[curr->prio]);
+              __set_bit(curr->prio, array->bitmap);
+              array->nr_active++;
+              rq->nr_running++;
+              curr->on_rq = 1;
+          }
+
+          // 设置需要调度标志
           set_tsk_need_resched(curr);
       }
+
+      spin_unlock(&rq->lock);
   }
 
+  // 主调度函数
   void schedule(void)
   {
+      struct rq *rq = &runqueue;
       struct task_struct *prev, *next;
+      unsigned long flags;
 
-      prev = current;
+      local_irq_save(flags);
+      spin_lock(&rq->lock);
 
-      // 选择下一个任务
-      next = pick_next_task();
+      prev = rq->curr;
+
+      // 如果当前进程不再运行，从队列移除
+      if (prev->state != TASK_RUNNING && prev->on_rq) {
+          dequeue_task(rq, prev);
+      }
+
+      // 选择下一个进程
+      next = pick_next_task(rq);
+
+      // 清除调度标志
+      clear_tsk_need_resched(prev);
 
       if (prev != next) {
+          rq->nr_switches++;
+          rq->curr = next;
+
           // 上下文切换
-          switch_to(prev, next);
+          context_switch(rq, prev, next);
+          // 注意：这里prev可能已经不是原来的进程了
       }
+
+      spin_unlock(&rq->lock);
+      local_irq_restore(flags);
   }
 
-  任务2.4：实现上下文切换（1周）
+  // 上下文切换
+  static void context_switch(struct rq *rq, struct task_struct *prev,
+                             struct task_struct *next)
+  {
+      struct mm_struct *mm = next->mm;
+      struct mm_struct *oldmm = prev->active_mm;
+
+      // 切换地址空间
+      if (!mm) {
+          // 内核线程借用前一个进程的mm
+          next->active_mm = oldmm;
+          atomic_inc(&oldmm->mm_count);
+      } else {
+          switch_mm(oldmm, mm, next);
+      }
+
+      if (!prev->mm) {
+          prev->active_mm = NULL;
+          atomic_dec(&oldmm->mm_count);
+      }
+
+      // 切换寄存器上下文
+      switch_to(prev, next);
+  }
+
+  // 唤醒进程
+  int wake_up_process(struct task_struct *p)
+  {
+      struct rq *rq = &runqueue;
+      unsigned long flags;
+
+      spin_lock_irqsave(&rq->lock, flags);
+
+      if (p->state == TASK_RUNNING) {
+          spin_unlock_irqrestore(&rq->lock, flags);
+          return 0;
+      }
+
+      p->state = TASK_RUNNING;
+      enqueue_task(rq, p);
+
+      // 如果比当前进程优先级高，设置调度标志
+      if (p->prio < rq->curr->prio)
+          set_tsk_need_resched(rq->curr);
+
+      spin_unlock_irqrestore(&rq->lock, flags);
+      return 1;
+  }
+
+  // 唤醒新创建的进程
+  void wake_up_new_task(struct task_struct *p)
+  {
+      struct rq *rq = &runqueue;
+      unsigned long flags;
+
+      spin_lock_irqsave(&rq->lock, flags);
+
+      p->state = TASK_RUNNING;
+      p->time_slice = DEF_TIMESLICE;
+      enqueue_task(rq, p);
+
+      spin_unlock_irqrestore(&rq->lock, flags);
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.5：上下文切换实现（1周）
+  ═══════════════════════════════════════════════════════════════
 
   /* arch/riscv64/kernel/switch.S */
 
-  ENTRY(__switch_to)
-      // 保存prev的寄存器
-      sd sp,  0(a0)   // 保存sp
-      sd s0,  8(a0)   // 保存s0-s11
-      sd s1, 16(a0)
-      // ... 保存其他callee-saved寄存器
+  #include <asm/asm-offsets.h>
 
-      // 恢复next的寄存器
-      ld sp,  0(a1)
-      ld s0,  8(a1)
-      ld s1, 16(a1)
-      // ...
+  /*
+   * 上下文切换
+   * void __switch_to(struct task_struct *prev, struct task_struct *next)
+   *
+   * a0 = prev task_struct
+   * a1 = next task_struct
+   */
+  .global __switch_to
+  .align 2
+  __switch_to:
+      // ========== 保存prev的上下文 ==========
 
-      // 切换页表
-      ld a0, TASK_MM_PGD(a1)
-      srli a0, a0, PAGE_SHIFT
-      li a1, SATP_MODE_SV39
-      or a0, a0, a1
-      csrw satp, a0
+      // 计算thread结构偏移
+      // prev->thread 在 task_struct 中的偏移是 TASK_THREAD
+
+      // 保存callee-saved寄存器到prev->thread
+      sd ra,  TASK_THREAD_RA(a0)
+      sd sp,  TASK_THREAD_SP(a0)
+      sd s0,  TASK_THREAD_S0(a0)
+      sd s1,  TASK_THREAD_S1(a0)
+      sd s2,  TASK_THREAD_S2(a0)
+      sd s3,  TASK_THREAD_S3(a0)
+      sd s4,  TASK_THREAD_S4(a0)
+      sd s5,  TASK_THREAD_S5(a0)
+      sd s6,  TASK_THREAD_S6(a0)
+      sd s7,  TASK_THREAD_S7(a0)
+      sd s8,  TASK_THREAD_S8(a0)
+      sd s9,  TASK_THREAD_S9(a0)
+      sd s10, TASK_THREAD_S10(a0)
+      sd s11, TASK_THREAD_S11(a0)
+
+      // ========== 恢复next的上下文 ==========
+
+      // 恢复callee-saved寄存器
+      ld ra,  TASK_THREAD_RA(a1)
+      ld sp,  TASK_THREAD_SP(a1)
+      ld s0,  TASK_THREAD_S0(a1)
+      ld s1,  TASK_THREAD_S1(a1)
+      ld s2,  TASK_THREAD_S2(a1)
+      ld s3,  TASK_THREAD_S3(a1)
+      ld s4,  TASK_THREAD_S4(a1)
+      ld s5,  TASK_THREAD_S5(a1)
+      ld s6,  TASK_THREAD_S6(a1)
+      ld s7,  TASK_THREAD_S7(a1)
+      ld s8,  TASK_THREAD_S8(a1)
+      ld s9,  TASK_THREAD_S9(a1)
+      ld s10, TASK_THREAD_S10(a1)
+      ld s11, TASK_THREAD_S11(a1)
+
+      // 返回（ra已经是next的返回地址）
+      ret
+
+  /*
+   * 切换地址空间
+   * void switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
+   *                struct task_struct *next)
+   */
+  .global switch_mm
+  switch_mm:
+      // 加载next_mm->pgd
+      ld t0, MM_PGD(a1)
+
+      // 构造SATP值：MODE | ASID | PPN
+      // SV39模式：MODE = 8
+      srli t0, t0, PAGE_SHIFT      // 转换为PPN
+      li t1, SATP_MODE_SV39
+      or t0, t0, t1
+
+      // 写入SATP
+      csrw satp, t0
+
+      // 刷新TLB
       sfence.vma
 
       ret
-  ENDPROC(__switch_to)
 
-  任务2.5：实现exec系统调用（2周）
+  /*
+   * fork后子进程的入口
+   */
+  .global ret_from_fork
+  ret_from_fork:
+      // 调用schedule_tail（完成调度切换的收尾工作）
+      call schedule_tail
+
+      // 检查是否是内核线程
+      ld t0, TASK_FLAGS(tp)       // tp = current
+      andi t0, t0, PF_KTHREAD
+      bnez t0, 1f
+
+      // 用户进程：返回用户态
+      j ret_to_user
+
+  1:  // 内核线程：调用内核线程函数
+      ld a0, TASK_THREAD_ARG(tp)  // 参数
+      ld t0, TASK_THREAD_FUNC(tp) // 函数指针
+      jalr t0
+      j do_exit
+
+  /* arch/riscv64/kernel/entry.S */
+
+  /*
+   * 返回用户态
+   */
+  .global ret_to_user
+  ret_to_user:
+      // 检查是否有待处理工作
+      ld t0, TASK_FLAGS(tp)
+      andi t0, t0, _TIF_WORK_MASK
+      bnez t0, work_pending
+
+  restore_all:
+      // 恢复用户态寄存器
+      RESTORE_ALL
+      sret
+
+  work_pending:
+      // 检查是否需要调度
+      andi t1, t0, _TIF_NEED_RESCHED
+      beqz t1, 1f
+      call schedule
+      j ret_to_user
+
+  1:  // 检查是否有待处理信号
+      andi t1, t0, _TIF_SIGPENDING
+      beqz t1, restore_all
+      call do_signal
+      j ret_to_user
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.6：exec 实现 - ELF加载器（2周）
+  ═══════════════════════════════════════════════════════════════
+
+  exec 替换当前进程的地址空间为新程序：
 
   /* fs/exec.c */
 
-  int do_execve(const char *filename, char **argv, char **envp)
+  // 二进制格式处理器
+  struct linux_binfmt {
+      struct list_head lh;
+      int (*load_binary)(struct linux_binprm *);
+      int (*load_shlib)(struct file *);
+      int (*core_dump)(struct coredump_params *);
+  };
+
+  // 二进制程序信息
+  struct linux_binprm {
+      char buf[BINPRM_BUF_SIZE];      // 文件头缓冲区
+      struct file *file;              // 可执行文件
+      int argc, envc;                 // 参数和环境变量数量
+      const char *filename;           // 文件名
+      const char *interp;             // 解释器路径
+      unsigned long p;                // 当前栈指针
+      unsigned long entry;            // 入口地址
+      unsigned long loader;           // 动态链接器地址
+      unsigned long exec;             // 执行地址
+  };
+
+  // execve系统调用
+  SYSCALL_DEFINE3(execve, const char __user *, filename,
+                  const char __user *const __user *, argv,
+                  const char __user *const __user *, envp)
   {
-      struct linux_binprm bprm;
-      struct file *file;
-      int ret;
-
-      // 1. 打开可执行文件
-      file = open_exec(filename);
-      if (IS_ERR(file)) return PTR_ERR(file);
-
-      // 2. 读取文件头
-      ret = prepare_binprm(&bprm);
-      if (ret < 0) goto out;
-
-      // 3. 根据文件格式加载（ELF/script）
-      ret = search_binary_handler(&bprm);
-      if (ret < 0) goto out;
-
-      // 4. 设置新的地址空间
-      ret = setup_arg_pages(&bprm);
-
-      // 5. 开始执行新程序
-      start_thread(regs, bprm.entry, bprm.p);
-
-  out:
-      return ret;
+      return do_execve(filename, argv, envp);
   }
 
-  任务2.6：实现ELF加载器（2周）
+  int do_execve(const char __user *filename,
+                const char __user *const __user *argv,
+                const char __user *const __user *envp)
+  {
+      struct linux_binprm *bprm;
+      struct file *file;
+      int retval;
+
+      // 1. 分配bprm结构
+      bprm = kzalloc(sizeof(*bprm), GFP_KERNEL);
+      if (!bprm)
+          return -ENOMEM;
+
+      // 2. 打开可执行文件
+      file = open_exec(filename);
+      if (IS_ERR(file)) {
+          retval = PTR_ERR(file);
+          goto out_free;
+      }
+      bprm->file = file;
+      bprm->filename = filename;
+
+      // 3. 读取文件头
+      retval = kernel_read(file, bprm->buf, BINPRM_BUF_SIZE, 0);
+      if (retval < 0)
+          goto out_close;
+
+      // 4. 计算参数数量
+      bprm->argc = count_argv(argv);
+      bprm->envc = count_argv(envp);
+      if (bprm->argc < 0 || bprm->envc < 0) {
+          retval = -EFAULT;
+          goto out_close;
+      }
+
+      // 5. 准备新的地址空间
+      retval = bprm_mm_init(bprm);
+      if (retval)
+          goto out_close;
+
+      // 6. 复制参数和环境变量到新栈
+      retval = copy_strings(bprm->envc, envp, bprm);
+      if (retval < 0)
+          goto out_mm;
+
+      retval = copy_strings(bprm->argc, argv, bprm);
+      if (retval < 0)
+          goto out_mm;
+
+      // 7. 查找并调用合适的加载器
+      retval = search_binary_handler(bprm);
+      if (retval < 0)
+          goto out_mm;
+
+      // 成功，旧的mm已经被释放
+      kfree(bprm);
+      return retval;
+
+  out_mm:
+      // 清理新分配的mm
+  out_close:
+      fput(file);
+  out_free:
+      kfree(bprm);
+      return retval;
+  }
+
+  // 搜索二进制处理器
+  int search_binary_handler(struct linux_binprm *bprm)
+  {
+      struct linux_binfmt *fmt;
+      int retval;
+
+      // 检查ELF
+      if (memcmp(bprm->buf, ELFMAG, SELFMAG) == 0) {
+          return load_elf_binary(bprm);
+      }
+
+      // 检查脚本（#!）
+      if (bprm->buf[0] == '#' && bprm->buf[1] == '!') {
+          return load_script(bprm);
+      }
+
+      return -ENOEXEC;
+  }
+
+  ELF加载器详细实现：
 
   /* fs/binfmt_elf.c */
 
+  // ELF文件头（64位）
+  typedef struct {
+      unsigned char e_ident[16];      // 魔数和标识
+      Elf64_Half e_type;              // 文件类型
+      Elf64_Half e_machine;           // 机器类型
+      Elf64_Word e_version;           // 版本
+      Elf64_Addr e_entry;             // 入口地址
+      Elf64_Off e_phoff;              // 程序头偏移
+      Elf64_Off e_shoff;              // 节头偏移
+      Elf64_Word e_flags;             // 标志
+      Elf64_Half e_ehsize;            // ELF头大小
+      Elf64_Half e_phentsize;         // 程序头条目大小
+      Elf64_Half e_phnum;             // 程序头数量
+      Elf64_Half e_shentsize;         // 节头条目大小
+      Elf64_Half e_shnum;             // 节头数量
+      Elf64_Half e_shstrndx;          // 节名字符串表索引
+  } Elf64_Ehdr;
+
+  // 程序头
+  typedef struct {
+      Elf64_Word p_type;              // 段类型
+      Elf64_Word p_flags;             // 段标志
+      Elf64_Off p_offset;             // 文件偏移
+      Elf64_Addr p_vaddr;             // 虚拟地址
+      Elf64_Addr p_paddr;             // 物理地址
+      Elf64_Xword p_filesz;           // 文件中大小
+      Elf64_Xword p_memsz;            // 内存中大小
+      Elf64_Xword p_align;            // 对齐
+  } Elf64_Phdr;
+
+  // 段类型
+  #define PT_NULL     0   // 未使用
+  #define PT_LOAD     1   // 可加载段
+  #define PT_DYNAMIC  2   // 动态链接信息
+  #define PT_INTERP   3   // 解释器路径
+  #define PT_PHDR     6   // 程序头表
+
+  // 加载ELF二进制
   static int load_elf_binary(struct linux_binprm *bprm)
   {
-      struct elfhdr *elf_ex = (struct elfhdr *)bprm->buf;
-      struct elf_phdr *elf_ppnt;
+      Elf64_Ehdr *elf_ex = (Elf64_Ehdr *)bprm->buf;
+      Elf64_Phdr *elf_phdata = NULL;
+      struct mm_struct *mm;
       unsigned long load_addr = 0;
-      int i;
+      unsigned long load_bias = 0;
+      unsigned long start_code, end_code, start_data, end_data;
+      unsigned long elf_bss, elf_brk;
+      int retval, i;
 
-      // 1. 验证ELF header
+      // 1. 验证ELF头
       if (memcmp(elf_ex->e_ident, ELFMAG, SELFMAG) != 0)
           return -ENOEXEC;
 
-      // 2. 读取program headers
-      elf_ppnt = load_elf_phdrs(elf_ex, bprm->file);
+      // 检查架构
+      if (elf_ex->e_machine != EM_RISCV)
+          return -ENOEXEC;
 
-      // 3. 清空旧地址空间
-      flush_old_exec(bprm);
+      // 检查类型（可执行文件或共享库）
+      if (elf_ex->e_type != ET_EXEC && elf_ex->e_type != ET_DYN)
+          return -ENOEXEC;
 
-      // 4. 加载各个段
+      // 2. 读取程序头表
+      elf_phdata = kmalloc(elf_ex->e_phnum * sizeof(Elf64_Phdr), GFP_KERNEL);
+      if (!elf_phdata)
+          return -ENOMEM;
+
+      retval = kernel_read(bprm->file, elf_phdata,
+                           elf_ex->e_phnum * sizeof(Elf64_Phdr),
+                           elf_ex->e_phoff);
+      if (retval < 0)
+          goto out_free;
+
+      // 3. 释放旧地址空间
+      retval = flush_old_exec(bprm);
+      if (retval)
+          goto out_free;
+
+      // 获取新的mm
+      mm = current->mm;
+
+      // 4. 初始化边界
+      start_code = ~0UL;
+      end_code = 0;
+      start_data = 0;
+      end_data = 0;
+      elf_bss = 0;
+      elf_brk = 0;
+
+      // 5. 加载所有PT_LOAD段
       for (i = 0; i < elf_ex->e_phnum; i++) {
-          if (elf_ppnt[i].p_type != PT_LOAD)
+          Elf64_Phdr *phdr = &elf_phdata[i];
+          unsigned long vaddr, size;
+          unsigned int prot = 0;
+
+          if (phdr->p_type != PT_LOAD)
               continue;
 
-          // 映射段到内存
-          error = elf_map(bprm->file,
-                         elf_ppnt[i].p_vaddr,
-                         &elf_ppnt[i]);
+          // 计算保护标志
+          if (phdr->p_flags & PF_R) prot |= PROT_READ;
+          if (phdr->p_flags & PF_W) prot |= PROT_WRITE;
+          if (phdr->p_flags & PF_X) prot |= PROT_EXEC;
+
+          vaddr = phdr->p_vaddr;
+          size = phdr->p_memsz;
+
+          // PIE/共享库：计算加载偏移
+          if (elf_ex->e_type == ET_DYN && load_addr == 0) {
+              load_bias = ELF_ET_DYN_BASE;
+          }
+
+          vaddr += load_bias;
+
+          // 映射段
+          retval = elf_map(bprm->file, vaddr, phdr, prot);
+          if (retval < 0)
+              goto out_free;
+
+          // 更新边界
+          if (phdr->p_flags & PF_X) {
+              if (vaddr < start_code)
+                  start_code = vaddr;
+              if (vaddr + phdr->p_filesz > end_code)
+                  end_code = vaddr + phdr->p_filesz;
+          }
+          if (start_data < vaddr)
+              start_data = vaddr;
+          if (end_data < vaddr + phdr->p_filesz)
+              end_data = vaddr + phdr->p_filesz;
+          if (elf_bss < vaddr + phdr->p_filesz)
+              elf_bss = vaddr + phdr->p_filesz;
+          if (elf_brk < vaddr + phdr->p_memsz)
+              elf_brk = vaddr + phdr->p_memsz;
+
+          if (load_addr == 0)
+              load_addr = vaddr - phdr->p_offset;
       }
 
-      // 5. 设置入口点
-      bprm->entry = elf_ex->e_entry;
+      // 6. 设置BSS（零初始化数据）
+      if (elf_bss != elf_brk) {
+          // BSS区域需要清零
+          retval = set_brk(elf_bss, elf_brk);
+          if (retval)
+              goto out_free;
+      }
 
-      return 0;
+      // 7. 设置mm边界
+      mm->start_code = start_code;
+      mm->end_code = end_code;
+      mm->start_data = start_data;
+      mm->end_data = end_data;
+      mm->start_brk = elf_brk;
+      mm->brk = elf_brk;
+
+      // 8. 设置用户栈
+      retval = setup_arg_pages(bprm, STACK_TOP);
+      if (retval < 0)
+          goto out_free;
+
+      mm->start_stack = bprm->p;
+
+      // 9. 设置auxv（musl需要）
+      create_elf_tables(bprm, elf_ex, load_addr, load_bias);
+
+      // 10. 设置入口点
+      bprm->entry = elf_ex->e_entry + load_bias;
+
+      // 11. 开始执行
+      start_thread(current_pt_regs(), bprm->entry, bprm->p);
+
+      retval = 0;
+
+  out_free:
+      kfree(elf_phdata);
+      return retval;
   }
 
-  任务2.7：实现wait/exit（1周）
+  // 映射ELF段
+  static unsigned long elf_map(struct file *file, unsigned long addr,
+                                Elf64_Phdr *phdr, int prot)
+  {
+      unsigned long map_addr;
+      unsigned long size = phdr->p_filesz + (phdr->p_vaddr & ~PAGE_MASK);
+      unsigned long off = phdr->p_offset - (phdr->p_vaddr & ~PAGE_MASK);
+
+      addr = addr & PAGE_MASK;
+      size = PAGE_ALIGN(size);
+
+      // 使用mmap映射
+      map_addr = do_mmap(file, addr, size, prot,
+                         MAP_PRIVATE | MAP_FIXED, off);
+
+      return map_addr;
+  }
+
+  // 创建ELF辅助向量（auxv）- musl启动必需
+  static void create_elf_tables(struct linux_binprm *bprm,
+                                 Elf64_Ehdr *exec, unsigned long load_addr,
+                                 unsigned long load_bias)
+  {
+      unsigned long *sp = (unsigned long *)bprm->p;
+
+      // auxv数组
+      #define NEW_AUX_ENT(id, val) \
+          do { *sp++ = id; *sp++ = val; } while(0)
+
+      NEW_AUX_ENT(AT_PHDR, load_addr + exec->e_phoff);
+      NEW_AUX_ENT(AT_PHENT, sizeof(Elf64_Phdr));
+      NEW_AUX_ENT(AT_PHNUM, exec->e_phnum);
+      NEW_AUX_ENT(AT_PAGESZ, PAGE_SIZE);
+      NEW_AUX_ENT(AT_BASE, 0);  // 动态链接器基址
+      NEW_AUX_ENT(AT_FLAGS, 0);
+      NEW_AUX_ENT(AT_ENTRY, exec->e_entry + load_bias);
+      NEW_AUX_ENT(AT_UID, current->uid);
+      NEW_AUX_ENT(AT_EUID, current->euid);
+      NEW_AUX_ENT(AT_GID, current->gid);
+      NEW_AUX_ENT(AT_EGID, current->egid);
+      NEW_AUX_ENT(AT_SECURE, 0);
+      NEW_AUX_ENT(AT_RANDOM, sp);  // 16字节随机数地址
+      NEW_AUX_ENT(AT_NULL, 0);
+
+      bprm->p = (unsigned long)sp;
+  }
+
+  // 设置初始用户态寄存器
+  void start_thread(struct pt_regs *regs, unsigned long pc, unsigned long sp)
+  {
+      memset(regs, 0, sizeof(*regs));
+      regs->sepc = pc;            // 程序入口
+      regs->sp = sp;              // 栈指针
+      regs->sstatus = SR_SPIE | SR_SUM;  // 用户态，允许用户内存访问
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.7：wait/exit 实现（1周）
+  ═══════════════════════════════════════════════════════════════
 
   /* kernel/exit.c */
 
-  void do_exit(int code)
+  // 进程退出
+  void do_exit(long code)
   {
       struct task_struct *tsk = current;
 
-      // 1. 设置退出状态
+      // 设置退出标志
+      tsk->flags |= PF_EXITING;
       tsk->exit_code = code;
 
-      // 2. 释放资源
-      exit_mm(tsk);       // 释放地址空间
-      exit_files(tsk);    // 关闭所有文件
-      exit_fs(tsk);       // 释放文件系统信息
+      // 1. 释放内存
+      exit_mm(tsk);
 
-      // 3. 通知父进程
+      // 2. 关闭文件
+      exit_files(tsk);
+
+      // 3. 释放文件系统信息
+      exit_fs(tsk);
+
+      // 4. 释放信号处理
+      exit_sighand(tsk);
+
+      // 5. 处理子进程（过继给init）
+      exit_notify(tsk);
+
+      // 6. 设置为僵尸状态
       tsk->state = TASK_ZOMBIE;
-      wake_up_parent(tsk);
 
-      // 4. 调度到其他进程
+      // 7. 通知父进程
+      if (tsk->parent)
+          wake_up_interruptible(&tsk->parent->wait_chldexit);
+
+      // 8. 调度离开
       schedule();
 
       // 永不返回
+      BUG();
   }
 
+  // 释放内存空间
+  void exit_mm(struct task_struct *tsk)
+  {
+      struct mm_struct *mm = tsk->mm;
+
+      if (!mm)
+          return;
+
+      tsk->mm = NULL;
+
+      // 减少引用计数
+      if (atomic_dec_and_test(&mm->mm_users)) {
+          // 最后一个用户，释放mm
+          exit_mmap(mm);
+          pgd_free(mm->pgd);
+          free_mm(mm);
+      }
+  }
+
+  // 释放所有VMA
+  void exit_mmap(struct mm_struct *mm)
+  {
+      struct vm_area_struct *vma, *next;
+
+      for (vma = mm->mmap; vma; vma = next) {
+          next = vma->vm_next;
+
+          // 取消映射
+          unmap_vma(mm, vma);
+
+          // 释放VMA结构
+          kfree(vma);
+      }
+
+      mm->mmap = NULL;
+      mm->map_count = 0;
+  }
+
+  // 处理子进程
+  static void exit_notify(struct task_struct *tsk)
+  {
+      struct task_struct *child, *tmp;
+
+      // 将所有子进程过继给init
+      list_for_each_entry_safe(child, tmp, &tsk->children, sibling) {
+          child->parent = &init_task;
+          child->real_parent = &init_task;
+          list_move_tail(&child->sibling, &init_task.children);
+
+          // 如果子进程是僵尸，通知init
+          if (child->state == TASK_ZOMBIE)
+              wake_up_interruptible(&init_task.wait_chldexit);
+      }
+  }
+
+  // exit系统调用
   SYSCALL_DEFINE1(exit, int, error_code)
   {
       do_exit((error_code & 0xff) << 8);
+      return 0;  // 永不返回
   }
 
+  // exit_group系统调用（终止整个线程组）
+  SYSCALL_DEFINE1(exit_group, int, error_code)
+  {
+      // 简化版：和exit相同
+      do_exit((error_code & 0xff) << 8);
+      return 0;
+  }
+
+  // wait系统调用实现
   SYSCALL_DEFINE4(wait4, pid_t, pid, int __user *, stat_addr,
                   int, options, struct rusage __user *, ru)
   {
-      struct task_struct *p;
-      int ret;
+      return do_wait(pid, stat_addr, options);
+  }
 
-      // 等待子进程
-      ret = wait_for_child(pid, stat_addr, options);
+  long do_wait(pid_t pid, int __user *stat_addr, int options)
+  {
+      struct task_struct *child;
+      int retval;
 
-      return ret;
+  repeat:
+      retval = -ECHILD;
+
+      // 查找匹配的子进程
+      list_for_each_entry(child, &current->children, sibling) {
+          if (pid > 0 && child->pid != pid)
+              continue;
+          if (pid == 0 && child->pgrp != current->pgrp)
+              continue;
+          if (pid < -1 && child->pgrp != -pid)
+              continue;
+
+          // 找到子进程
+          if (child->state == TASK_ZOMBIE) {
+              // 子进程已退出
+              retval = child->pid;
+
+              // 返回退出状态
+              if (stat_addr)
+                  put_user(child->exit_code, stat_addr);
+
+              // 释放子进程
+              release_task(child);
+              return retval;
+          }
+
+          // 有子进程但未退出
+          retval = 0;
+      }
+
+      if (retval == -ECHILD)
+          return -ECHILD;
+
+      // WNOHANG：不阻塞
+      if (options & WNOHANG)
+          return 0;
+
+      // 等待子进程退出
+      retval = wait_event_interruptible(current->wait_chldexit,
+                                         has_zombie_child(current));
+      if (retval == -ERESTARTSYS)
+          return retval;
+
+      goto repeat;
+  }
+
+  // 释放僵尸进程
+  void release_task(struct task_struct *p)
+  {
+      // 从父进程的子进程链表移除
+      list_del(&p->sibling);
+
+      // 从全局进程链表移除
+      list_del(&p->tasks);
+
+      // 释放PID
+      free_pid(p->pid);
+
+      // 释放内核栈
+      free_thread_info(task_thread_info(p));
+
+      // 释放task_struct
+      free_task_struct(p);
+  }
+
+  ═══════════════════════════════════════════════════════════════
+  任务2.8：idle进程和init进程（1周）
+  ═══════════════════════════════════════════════════════════════
+
+  系统启动后的进程结构：
+
+  PID 0: idle（swapper）
+    │
+    └── PID 1: init
+          │
+          ├── PID 2: shell
+          │     │
+          │     └── PID 3: user_program
+          │
+          └── PID 4: other_daemon
+
+  /* init/main.c */
+
+  // init_task是idle进程（PID 0）的task_struct
+  // 静态初始化，不是fork出来的
+  struct task_struct init_task = {
+      .state          = TASK_RUNNING,
+      .flags          = PF_KTHREAD,
+      .prio           = MAX_PRIO - 1,
+      .static_prio    = MAX_PRIO - 1,
+      .policy         = SCHED_NORMAL,
+      .pid            = 0,
+      .tgid           = 0,
+      .comm           = "swapper",
+      .mm             = NULL,  // 内核线程
+      .active_mm      = &init_mm,
+      .tasks          = LIST_HEAD_INIT(init_task.tasks),
+      .children       = LIST_HEAD_INIT(init_task.children),
+      .sibling        = LIST_HEAD_INIT(init_task.sibling),
+  };
+
+  // 内核地址空间
+  struct mm_struct init_mm = {
+      .pgd            = swapper_pg_dir,
+      .mm_users       = ATOMIC_INIT(2),
+      .mm_count       = ATOMIC_INIT(1),
+  };
+
+  // 创建init进程
+  static int kernel_init(void *unused)
+  {
+      // 现在运行在PID 1进程中
+
+      // 等待所有初始化完成
+      wait_for_initramfs();
+
+      // 尝试执行init程序
+      if (execute_command) {
+          // 命令行指定的init
+          run_init_process(execute_command);
+      }
+
+      // 尝试标准init路径
+      run_init_process("/sbin/init");
+      run_init_process("/etc/init");
+      run_init_process("/bin/init");
+      run_init_process("/bin/sh");
+
+      panic("No init found!");
+      return 0;
+  }
+
+  static void run_init_process(const char *init_filename)
+  {
+      const char *argv[] = { init_filename, NULL };
+      const char *envp[] = { "HOME=/", "PATH=/bin:/sbin", NULL };
+
+      kernel_execve(init_filename, argv, envp);
+  }
+
+  // 主初始化函数
+  asmlinkage void __init start_kernel(void)
+  {
+      // ... 各种初始化 ...
+
+      // 初始化调度器
+      sched_init();
+
+      // 创建内核线程
+      kernel_thread(kernel_init, NULL, CLONE_FS);
+
+      // 变成idle进程
+      cpu_idle();
+  }
+
+  // idle循环
+  void cpu_idle(void)
+  {
+      while (1) {
+          // 如果有可运行进程，调度
+          while (!need_resched()) {
+              // 低功耗等待中断
+              asm volatile ("wfi");
+          }
+          schedule();
+      }
+  }
+
+  // 创建内核线程
+  pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
+  {
+      struct pt_regs regs;
+
+      memset(&regs, 0, sizeof(regs));
+      regs.a0 = (unsigned long)fn;
+      regs.a1 = (unsigned long)arg;
+
+      return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs);
   }
 
   阶段2验收标准：
-  - ⬜ 能创建新进程（fork）
+  - ⬜ 能创建新进程（fork），支持COW
   - ⬜ 能加载并执行ELF程序（exec）
   - ⬜ 进程能正常调度和切换
   - ⬜ 父子进程关系正确
   - ⬜ wait/exit正常工作
+  - ⬜ idle进程和init进程正常运行
+  - ⬜ 用户态程序能够运行
 
   ---
   阶段3：系统调用层（2-3个月）
