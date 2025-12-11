@@ -18,13 +18,7 @@ _start:
     csrw CSR_IE, x0
     csrw CSR_IP, x0
 
-    /* Set machine mode */
-    csrr t0, CSR_MSTATUS
-    li t1, 0x1800
-    or t0, t0, t1
-    csrw CSR_MSTATUS, t0
-
-    /* Configure PMP to allow all memory access */
+    /* Configure PMP to allow all memory access (must do in M-mode) */
     li t0, 0xf
     csrw CSR_PMPCFG0, t0
     li t0, -1
@@ -33,8 +27,28 @@ _start:
     /* Setup stack */
     la sp, __stack_end
 
-    /* Jump to C initialization */
-    call kinit
+    /* Prepare to transition from M-mode to S-mode */
+    /* Set MSTATUS.MPP to S-mode (01) */
+    csrr t0, CSR_MSTATUS
+    li t1, (3 << 11)       /* MPP mask at bits [12:11] */
+    not t1, t1             /* Invert to clear bits */
+    and t0, t0, t1         /* Clear MPP bits */
+    li t1, (1 << 11)       /* MPP = 01 (S-mode) */
+    or t0, t0, t1          /* Set MPP to S-mode */
+    csrw CSR_MSTATUS, t0
+
+    /* Set MEPC to kinit address (return address for mret) */
+    la t0, kinit
+    csrw CSR_MEPC, t0
+
+    /* Delegate exceptions to S-mode */
+    li t0, 0xffff
+    csrw CSR_MEDELEG, t0   /* Delegate all exceptions */
+    li t0, 0xffff
+    csrw CSR_MIDELEG, t0   /* Delegate all interrupts */
+
+    /* Return from M-mode to S-mode, jumping to kinit */
+    mret
 
     /* Should never reach here */
 1:  la a0, error_msg

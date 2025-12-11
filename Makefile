@@ -46,6 +46,7 @@ C_SRCS = $(ARCH_DIR)/kernel/main.c \
          $(ARCH_DIR)/mm/page_alloc.c \
          $(ARCH_DIR)/mm/pgtable.c \
          $(ARCH_DIR)/mm/slab.c \
+         $(ARCH_DIR)/mm/vmalloc.c \
          $(KERNEL_DIR)/sched.c \
          $(KERNEL_DIR)/syscalls.c \
          $(KERNEL_DIR)/board.c \

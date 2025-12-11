@@ -12,32 +12,29 @@ void kmem_init(void);
 int pgtable_init(void);
 void enable_mmu(void);
 void get_mem_info(unsigned long *total, unsigned long *free);
+void vmalloc_init(void);
 
 /* Initialize MMU */
 void mm_init(void)
 {
-    /* Initialize page allocator */
+    early_puts("\n=== Memory Management Initialization ===\n");
+
+    /* Initialize buddy allocator for physical pages */
     page_init();
 
-    /* Initialize slab allocator */
+    /* Initialize slab allocator for kernel objects */
     kmem_init();
 
-    /* Initialize page tables */
+    /* Initialize page tables and enable MMU */
     if (pgtable_init() == 0) {
-        /* TEMPORARILY DISABLE MMU TO TEST INPUT */
-        /* enable_mmu(); */
-        early_puts("✓ MMU ready (DISABLED)\n");
+        enable_mmu();
+        early_puts("✓ MMU enabled with SV39 paging\n");
     } else {
-        early_puts("! Page table init failed\n");
+        early_puts("✗ Page table initialization failed\n");
     }
-}
 
+    /* Initialize vmalloc subsystem */
+    vmalloc_init();
 
-/* Page table operations */
-
-void flush_tlb_range(unsigned long start, unsigned long size)
-{
-    /* Suppress unused parameter warning */
-    (void)size;
-    asm volatile ("sfence.vma %0" :: "r"(start) : "memory");
+    early_puts("=== Memory Management Ready ===\n\n");
 }

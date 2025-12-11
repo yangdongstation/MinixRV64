@@ -16,6 +16,9 @@
 /* Machine mode CSRs */
 #define CSR_MSTATUS    0x300
 #define CSR_MISA       0x301
+#define CSR_MEDELEG    0x302
+#define CSR_MIDELEG    0x303
+#define CSR_MIE        0x304
 #define CSR_MTVEC      0x305
 #define CSR_MSCRATCH   0x340
 #define CSR_MEPC       0x341
