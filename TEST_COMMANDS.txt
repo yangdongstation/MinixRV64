@@ -1,0 +1,95 @@
+========================================
+MinixRV64 测试命令列表
+========================================
+
+启动后，在 minix# 提示符下依次尝试以下命令：
+
+基本测试：
+----------
+help
+echo Hello, MinixRV64!
+uname
+ps
+pwd
+
+功能测试：
+----------
+echo Testing UART driver
+echo Test 1 2 3
+clear
+help
+
+系统信息：
+----------
+uname
+ps
+
+文件系统命令（当前未挂载）：
+----------------------------
+ls
+cat test.txt
+mkdir /tmp/test
+pwd
+
+多参数测试：
+------------
+echo one two three four five
+echo Testing with special chars: !@#$%
+
+长命令测试：
+------------
+echo This is a very long command to test the input buffer and see how it handles longer text
+
+退出QEMU：
+----------
+按 Ctrl+A 然后按 X
+
+========================================
+预期输出示例
+========================================
+
+minix# help
+Available commands:
+  help - Show available commands
+  clear - Clear screen
+  echo - Echo arguments
+  ls - List directory contents
+  cat - Display file contents
+  pwd - Print working directory
+  cd - Change directory
+  mkdir - Create directory
+  rm - Remove file
+  ps - List processes
+  kill - Kill process
+  reboot - Reboot system
+  uname - Show system information
+
+minix# echo Hello, MinixRV64!
+Hello, MinixRV64!
+
+minix# uname
+Minix RV64 for RISC-V 64-bit
+Board: QEMU virt
+
+minix# ps
+PID  CMD
+  1  kernel
+
+minix# pwd
+/
+
+minix# ls
+ls: filesystem not yet mounted
+
+========================================
+快速复制粘贴测试
+========================================
+
+以下是可以直接复制粘贴的测试序列（注意：QEMU可能不支持粘贴，需要手动输入）：
+
+help
+echo Test 1
+uname
+ps
+
+========================================

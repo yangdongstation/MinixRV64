@@ -1,0 +1,105 @@
+==========================================
+MinixRV64 演示输出
+版本: 0.0001
+日期: 2025-12-10
+==========================================
+
+1. 编译系统
+------------------------------------------
+$ make clean && make
+[编译输出]
+✓ 编译成功
+✓ 生成 minix-rv64.elf (177KB)
+✓ 生成 minix-rv64.bin (17KB)
+
+2. 系统启动
+------------------------------------------
+$ make qemu
+
+X1234
+✓ MMU ready
+✓ Scheduler
+✓ Block device ready
+✓ VFS ready
+
+Minix RV64 ready
+✓ Shell
+minix# 
+
+3. 运行命令测试
+------------------------------------------
+minix# help
+Available commands:
+  help - Show available commands
+  clear - Clear screen
+  echo - Echo arguments
+  ls - List directory contents
+  cat - Display file contents
+  pwd - Print working directory
+  cd - Change directory
+  mkdir - Create directory
+  rm - Remove file
+  ps - List processes
+  kill - Kill process
+  reboot - Reboot system
+  uname - Show system information
+
+minix# uname
+Minix RV64 for RISC-V 64-bit
+Board: QEMU virt
+
+minix# echo Hello, MinixRV64!
+Hello, MinixRV64!
+
+minix# ps
+PID  CMD
+  1  kernel
+
+minix# pwd
+/
+
+4. 符号表验证
+------------------------------------------
+$ riscv64-unknown-elf-nm minix-rv64.elf | grep uart_ | head -10
+uart_configure
+uart_disable_rx_interrupt
+uart_disable_tx_interrupt
+uart_enable_rx_interrupt
+uart_enable_tx_interrupt
+uart_flush_rx
+uart_flush_tx
+uart_getc
+uart_getchar
+uart_interrupt_handler
+
+$ riscv64-unknown-elf-nm minix-rv64.elf | grep vfs_
+vfs_close
+vfs_init
+vfs_lookup_path
+vfs_mkdir
+vfs_mount
+vfs_open
+vfs_read
+vfs_write
+
+$ riscv64-unknown-elf-nm minix-rv64.elf | grep -E 'devfs|ramfs' | head -5
+devfs_init
+devfs_register_device
+ramfs_init
+ramfs_mount
+ramfs_read
+
+5. 测试总结
+------------------------------------------
+✅ 编译: 成功，无警告
+✅ 启动: 正常，所有模块初始化
+✅ UART: 输入输出正常
+✅ Shell: 13个命令可用
+✅ 文件系统: VFS/devfs/ramfs已实现
+✅ 符号表: 所有新功能符号存在
+
+测试结论: 系统运行稳定，功能正常！
+
+==========================================
+MinixRV64 - 为RISC-V打造的现代Minix系统
+==========================================

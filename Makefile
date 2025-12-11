@@ -74,7 +74,7 @@ QEMU_CPU = rv64
 QEMU_SMP = 1
 QEMU_MEMORY = 128M
 QEMU_BIOS = none
-QEMU_SERIAL = mon:stdio
+QEMU_SERIAL = stdio
 QEMU_EXTRA_ARGS = -device virtio-net-device,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
 
 .PHONY: all clean qemu qemu-debug qemu-gdb
@@ -106,6 +106,7 @@ qemu: $(KERNEL_IMAGE)
 		-kernel $(KERNEL_ELF) \
 		-serial $(QEMU_SERIAL) \
 		-nographic \
+		-monitor none \
 		$(QEMU_EXTRA_ARGS)
 
 qemu-debug: $(KERNEL_IMAGE)
@@ -118,6 +119,7 @@ qemu-debug: $(KERNEL_IMAGE)
 		-kernel $(KERNEL_ELF) \
 		-serial $(QEMU_SERIAL) \
 		-nographic \
+		-monitor none \
 		-s -S \
 		$(QEMU_EXTRA_ARGS)
 

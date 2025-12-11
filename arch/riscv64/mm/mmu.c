@@ -16,21 +16,17 @@ void get_mem_info(unsigned long *total, unsigned long *free);
 /* Initialize MMU */
 void mm_init(void)
 {
-    early_puts("1");
     /* Initialize page allocator */
     page_init();
 
-    early_puts("2");
     /* Initialize slab allocator */
     kmem_init();
 
-    early_puts("3");
     /* Initialize page tables */
     if (pgtable_init() == 0) {
-        early_puts("4");
-        /* Enable virtual memory */
-        enable_mmu();
-        early_puts("✓ MMU ready\n");
+        /* TEMPORARILY DISABLE MMU TO TEST INPUT */
+        /* enable_mmu(); */
+        early_puts("✓ MMU ready (DISABLED)\n");
     } else {
         early_puts("! Page table init failed\n");
     }

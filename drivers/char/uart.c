@@ -196,10 +196,9 @@ void uart_putc(char c)
 /* Check if character is available */
 int uart_haschar(void)
 {
-    /* Always return 1 to avoid MMIO reads in polling loop.
-     * Let uart_getchar() handle the actual hardware check.
-     * This eliminates the performance bottleneck in QEMU. */
-    return 1;
+    volatile unsigned int lsr;
+    lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);
+    return (lsr & 0x01) ? 1 : 0;
 }
 
 /* Get character (blocking) */
@@ -220,6 +219,9 @@ char uart_getchar(void)
 }
 
 /* Get character (non-blocking) */
+/* External debug function */
+extern void early_puts(const char *s);
+
 int uart_getc(void)
 {
     volatile unsigned int lsr = uart_read_reg(BOARD_UART_BASE, UART_LSR);

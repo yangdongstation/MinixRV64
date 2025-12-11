@@ -148,6 +148,7 @@ int vfs_mount(const char *device, const char *mount_point, const char *fstype)
 
     mnt->fstype = fstype;
     mnt->ops = ops;
+    mnt->root = NULL;
 
     /* Call filesystem mount operation */
     if (ops->mount && ops->mount(device, mount_point) != 0) {
@@ -155,6 +156,16 @@ int vfs_mount(const char *device, const char *mount_point, const char *fstype)
         early_puts(fstype);
         early_puts("\n");
         return -1;
+    }
+
+    /* Get root inode from filesystem */
+    early_puts("VFS: Getting root inode...\n");
+    if (ops->read_inode) {
+        mnt->root = ops->read_inode(1);  /* Root inode is always 1 */
+        if (mnt->root == NULL) {
+            early_puts("VFS: Failed to get root inode\n");
+            return -1;
+        }
     }
 
     early_puts("VFS: Mounted ");
@@ -331,8 +342,80 @@ file_t *vfs_open(const char *path, int flags)
 {
     inode_t *inode;
     file_t *file;
+    mount_point_t *mnt;
 
     inode = vfs_lookup_path(path);
+
+    /* If file doesn't exist and O_CREAT is set, create it */
+    if (inode == NULL && (flags & O_CREAT)) {
+        char parent_path[256];
+        char file_name[256];
+        const char *p, *last_slash;
+        char *q;
+        inode_t *parent_inode;
+
+        mnt = vfs_find_mount(path);
+        if (mnt == NULL) {
+            return NULL;
+        }
+
+        /* Find parent directory path and file name */
+        last_slash = NULL;
+        for (p = path; *p; p++) {
+            if (*p == '/') {
+                last_slash = p;
+            }
+        }
+
+        if (last_slash == NULL || last_slash == path) {
+            /* No parent or root parent */
+            parent_inode = mnt->root;
+            p = path;
+            while (*p == '/') p++;
+            q = file_name;
+            while (*p && q < file_name + sizeof(file_name) - 1) {
+                *q++ = *p++;
+            }
+            *q = '\0';
+        } else {
+            /* Copy parent path */
+            p = path;
+            q = parent_path;
+            while (p < last_slash && q < parent_path + sizeof(parent_path) - 1) {
+                *q++ = *p++;
+            }
+            *q = '\0';
+
+            /* Copy file name */
+            p = last_slash + 1;
+            q = file_name;
+            while (*p && q < file_name + sizeof(file_name) - 1) {
+                *q++ = *p++;
+            }
+            *q = '\0';
+
+            /* Lookup parent directory */
+            parent_inode = vfs_lookup_path(parent_path);
+            if (parent_inode == NULL) {
+                return NULL;
+            }
+        }
+
+        /* Create file using mkdir with S_IFREG (this is a hack, ideally we'd have create op) */
+        if (mnt->ops->mkdir) {
+            /* Use mkdir to create a regular file */
+            if (mnt->ops->mkdir(parent_inode, file_name, 0644) < 0) {
+                return NULL;
+            }
+            /* Now lookup the created file */
+            inode = vfs_lookup_path(path);
+            if (inode) {
+                /* Change mode to regular file */
+                inode->mode = (inode->mode & ~S_IFMT) | S_IFREG;
+            }
+        }
+    }
+
     if (inode == NULL) {
         return NULL;
     }
@@ -344,9 +427,21 @@ file_t *vfs_open(const char *path, int flags)
     }
 
     file->inode = inode;
-    file->pos = 0;
+    file->pos = (flags & O_APPEND) ? inode->size : 0;
     file->flags = flags;
     file->private = NULL;
+
+    /* Truncate if requested */
+    if (flags & O_TRUNC) {
+        inode->size = 0;
+        /* Update filesystem-specific size */
+        if (inode->fs_private) {
+            mnt = vfs_find_mount("");
+            if (mnt && mnt->ops->write_inode) {
+                mnt->ops->write_inode(inode);
+            }
+        }
+    }
 
     return file;
 }
@@ -408,8 +503,11 @@ ssize_t vfs_write(file_t *file, const void *buf, size_t count)
 int vfs_mkdir(const char *path, u32 mode)
 {
     mount_point_t *mnt;
-
-    (void)mode;  /* Suppress unused parameter warning */
+    char parent_path[256];
+    char dir_name[256];
+    const char *p, *last_slash;
+    char *q;
+    inode_t *parent_inode;
 
     if (path == NULL) {
         return -1;
@@ -420,8 +518,49 @@ int vfs_mkdir(const char *path, u32 mode)
         return -1;
     }
 
-    /* TODO: Find parent directory */
-    return -1;
+    /* Find parent directory path and directory name */
+    last_slash = NULL;
+    for (p = path; *p; p++) {
+        if (*p == '/') {
+            last_slash = p;
+        }
+    }
+
+    if (last_slash == NULL || last_slash == path) {
+        /* No parent or root parent */
+        parent_inode = mnt->root;
+        p = path;
+        while (*p == '/') p++;
+        q = dir_name;
+        while (*p && q < dir_name + sizeof(dir_name) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+    } else {
+        /* Copy parent path */
+        p = path;
+        q = parent_path;
+        while (p < last_slash && q < parent_path + sizeof(parent_path) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+
+        /* Copy directory name */
+        p = last_slash + 1;
+        q = dir_name;
+        while (*p && q < dir_name + sizeof(dir_name) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+
+        /* Lookup parent directory */
+        parent_inode = vfs_lookup_path(parent_path);
+        if (parent_inode == NULL) {
+            return -1;
+        }
+    }
+
+    return mnt->ops->mkdir(parent_inode, dir_name, mode);
 }
 
 /* Remove directory */
@@ -440,4 +579,97 @@ int vfs_rmdir(const char *path)
 
     /* TODO: Implement rmdir */
     return -1;
+}
+
+/* Read directory entries */
+int vfs_readdir(const char *path, dirent_t *entries, int count)
+{
+    inode_t *inode;
+    mount_point_t *mnt;
+
+    if (path == NULL || entries == NULL) {
+        return -1;
+    }
+
+    inode = vfs_lookup_path(path);
+    if (inode == NULL) {
+        return -1;
+    }
+
+    mnt = vfs_find_mount(path);
+    if (mnt == NULL || mnt->ops->readdir == NULL) {
+        return -1;
+    }
+
+    return mnt->ops->readdir(inode, entries, count);
+}
+
+/* Create a new file */
+int vfs_create(const char *path, u32 mode)
+{
+    mount_point_t *mnt;
+    char parent_path[256];
+    char file_name[256];
+    const char *p, *last_slash;
+    char *q;
+    inode_t *parent_inode;
+
+    if (path == NULL) {
+        return -1;
+    }
+
+    mnt = vfs_find_mount(path);
+    if (mnt == NULL) {
+        return -1;
+    }
+
+    /* Find parent directory path and file name */
+    last_slash = NULL;
+    for (p = path; *p; p++) {
+        if (*p == '/') {
+            last_slash = p;
+        }
+    }
+
+    if (last_slash == NULL || last_slash == path) {
+        /* No parent or root parent */
+        parent_inode = mnt->root;
+        p = path;
+        while (*p == '/') p++;
+        q = file_name;
+        while (*p && q < file_name + sizeof(file_name) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+    } else {
+        /* Copy parent path */
+        p = path;
+        q = parent_path;
+        while (p < last_slash && q < parent_path + sizeof(parent_path) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+
+        /* Copy file name */
+        p = last_slash + 1;
+        q = file_name;
+        while (*p && q < file_name + sizeof(file_name) - 1) {
+            *q++ = *p++;
+        }
+        *q = '\0';
+
+        /* Lookup parent directory */
+        parent_inode = vfs_lookup_path(parent_path);
+        if (parent_inode == NULL) {
+            return -1;
+        }
+    }
+
+    /* Use mkdir with S_IFREG mode for file creation */
+    /* This is a temporary solution - ideally we'd have a separate create operation */
+    (void)parent_inode;
+    (void)file_name;
+    (void)mode;
+
+    return -1;  /* Not fully implemented yet */
 }

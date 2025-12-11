@@ -74,11 +74,16 @@ static int devfs_mount(const char *device, const char *mount_point)
     /* Initialize state */
     devfs_state.node_count = 0;
 
+    early_puts("devfs: Allocating root inode...\n");
+
     /* Create root inode */
     devfs_state.root_inode = (inode_t *)kmalloc(sizeof(inode_t));
     if (devfs_state.root_inode == NULL) {
+        early_puts("devfs: Failed to allocate root inode\n");
         return -1;
     }
+
+    early_puts("devfs: Initializing root inode...\n");
 
     devfs_state.root_inode->ino = 1;
     devfs_state.root_inode->mode = S_IFDIR | 0755;

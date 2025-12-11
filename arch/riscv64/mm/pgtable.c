@@ -33,8 +33,8 @@ extern void flush_tlb_page(unsigned long addr);
 /* Page table entry structure */
 typedef unsigned long pte_t;
 
-/* Page directory */
-static pte_t *root_pgtable = NULL;
+/* Static page directory - 4KB aligned */
+static pte_t root_pgtable[PTRS_PER_PTE] __attribute__((aligned(4096)));
 
 /* Satp register value */
 static unsigned long satp_value = 0;
@@ -45,39 +45,61 @@ extern void free_page(unsigned long addr);
 extern unsigned long phys_to_virt(unsigned long addr);
 extern unsigned long virt_to_phys(unsigned long addr);
 
+/* Static second-level page table for UART region */
+static pte_t uart_pgtable[PTRS_PER_PTE] __attribute__((aligned(4096)));
+
 /* Initialize page table */
 int pgtable_init(void)
 {
-    /* Allocate root page directory */
-    unsigned long page = alloc_page();
-    if (page == 0) {
-        return -1;
-    }
-
-    root_pgtable = (pte_t *)phys_to_virt(page);
+    extern void early_puts(const char *);
 
     /* Clear root page directory */
     for (int i = 0; i < PTRS_PER_PTE; i++) {
         root_pgtable[i] = 0;
     }
 
-    /* Set up identity mapping for kernel space (0x80000000 - 0x81000000) */
-    unsigned long va = 0x80000000UL;
-    unsigned long end_va = 0x81000000UL;
-
-    while (va < end_va) {
-        /* PTE for 2MB page */
-        pte_t *pte = &root_pgtable[va >> PGDIR_SHIFT];
-
-        *pte = (va >> 12) << PTE_PPN_SHIFT;
-        *pte |= PTE_V | PTE_R | PTE_W | PTE_X;
-
-        va += (1UL << PGDIR_SHIFT);
+    /* Clear UART page table */
+    for (int i = 0; i < PTRS_PER_PTE; i++) {
+        uart_pgtable[i] = 0;
     }
 
-    /* Set SATP register */
-    satp_value = ((unsigned long)virt_to_phys((unsigned long)root_pgtable) >> 12) |
-                   (8UL << 60);  /* SV39 mode */
+    early_puts("[MMU] Setting up page tables...\n");
+
+    /* Map 0x00000000-0x0FFFFFFF using gigapage (for CLINT, PLIC, etc) */
+    unsigned long pa = 0;
+    root_pgtable[0] = (pa >> 12) << PTE_PPN_SHIFT;
+    root_pgtable[0] |= PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+
+    /* Map 0x10000000-0x1FFFFFFF (UART region) using 2-level page table with 4KB pages */
+    unsigned long uart_pt_pa = virt_to_phys((unsigned long)uart_pgtable);
+    root_pgtable[0x10000000UL >> PGDIR_SHIFT] = (uart_pt_pa >> 12) << PTE_PPN_SHIFT;
+    root_pgtable[0x10000000UL >> PGDIR_SHIFT] |= PTE_V;  /* Non-leaf, only V bit */
+
+    /* Map 4KB pages for UART region (0x10000000-0x10001000) */
+    /* At second level, we map 2MB regions, each entry covers 4KB */
+    /* Index for 0x10000000: bits [20:12] = 0 */
+    for (int i = 0; i < 2; i++) {  /* Map 8KB to be safe */
+        unsigned long page_pa = 0x10000000UL + ((unsigned long)i << PTE_SHIFT);
+        int pte_idx = (0x10000000UL >> PTE_SHIFT) & 0x1FF;
+        uart_pgtable[pte_idx + i] = (page_pa >> 12) << PTE_PPN_SHIFT;
+        uart_pgtable[pte_idx + i] |= PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+    }
+
+    /* Map 0x20000000-0x3FFFFFFF using gigapage */
+    pa = 0x20000000UL;
+    root_pgtable[1] = (pa >> 12) << PTE_PPN_SHIFT;
+    root_pgtable[1] |= PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+
+    /* Map 2GB-3GB (0x80000000-0xBFFFFFFF) as R/W/X for kernel */
+    pa = 0x80000000UL;
+    root_pgtable[2] = (pa >> 12) << PTE_PPN_SHIFT;
+    root_pgtable[2] |= PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D;
+
+    early_puts("[MMU] Page table setup complete\n");
+
+    /* Set SATP register - root_pgtable is in BSS, identity mapped */
+    unsigned long root_pa = virt_to_phys((unsigned long)root_pgtable);
+    satp_value = (root_pa >> 12) | (8UL << 60);  /* SV39 mode */
 
     return 0;
 }
