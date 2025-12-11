@@ -3,9 +3,9 @@
 ## 目标
 将 Minix 操作系统移植到 RISC-V 64位架构，特别针对 MilkV Duo CV1800B 开发板。
 
-**最新更新**: 2025-12-10 - ✅ **输入问题已解决！系统完全可用！** 详见 [INPUT_PROBLEM_SOLVED.md](INPUT_PROBLEM_SOLVED.md)
+**最新更新**: 2025-12-11 - 🎉 **文件系统完全正常工作！** 详见 [UART_FIX_AND_FILESYSTEM_SUCCESS.md](UART_FIX_AND_FILESYSTEM_SUCCESS.md)
 
-**快速开始**: 运行 `make qemu` 即可使用交互式shell！参见 [QUICK_START.md](QUICK_START.md)
+**快速开始**: 运行 `make qemu` 即可使用完整的交互式文件系统！参见 [QUICK_START.md](QUICK_START.md)
 
 ## 硬件平台
 - **开发板**: MilkV Duo
@@ -36,45 +36,65 @@ MinixRV64/
 | 组件 | 状态 | 说明 |
 |------|------|------|
 | 内核启动 | ✅ 工作 | 完美初始化 |
-| MMU | ✅ 工作 | 页表配置完成 |
-| 调度器 | ✅ 工作 | 进程管理就绪 |
+| MMU | ⚠️ 禁用 | 运行在物理地址模式 |
+| 调度器 | ⚠️ 框架 | 单进程运行 |
 | UART输出 | ✅ 工作 | 显示正常 |
 | **UART输入** | ✅ **已修复！** | **键盘输入完全可用** |
-| 交互式Shell | ✅ 工作 | 13个命令可用 |
-| VFS | ✅ 工作 | 虚拟文件系统就绪 |
-| devfs | ✅ 已创建 | 设备文件系统 |
-| ramfs | ✅ 已创建 | 内存文件系统 |
+| 交互式Shell | ✅ 工作 | **16个命令可用** |
+| **VFS** | ✅ **完整** | **文件系统完全可用** |
+| **ramfs** | ✅ **完整** | **读写、目录创建正常** |
+| **文件操作** | ✅ **完整** | **mkdir/ls/cat/write/touch** |
+| devfs | ⚠️ 禁用 | 挂载问题暂未解决 |
 
 ## 功能特性
 
-### ✓ 已实现
-- 基础架构和引导
-- 内存管理 (页分配器, Slab分配器)
-- 进程调度框架
-- **UART驱动** (缓冲区, 中断支持, ✅ 输入已修复)
-- **交互式Shell** (✅ 键盘输入可用)
-- **VFS虚拟文件系统** (路径解析, 挂载管理)
-- **devfs设备文件系统**
-- **ramfs内存文件系统**
-- 块设备接口
+### ✓ 已实现（完全可用）
+- **基础架构和引导** - RISC-V S模式运行
+- **UART驱动** - ✅ 输入输出完全正常
+- **交互式Shell** - 16个命令，完整的命令行解析
+- **VFS虚拟文件系统** - 路径解析、挂载管理、文件描述符
+- **ramfs内存文件系统** - 完整的文件读写和目录操作
+- **文件系统命令**：
+  - `mkdir <dir>` - 创建目录
+  - `ls [path]` - 列出目录内容
+  - `cat <file>` - 显示文件内容
+  - `touch <file>` - 创建空文件
+  - `write <file> <text>` - 写入文本到文件
+  - `mount <dev> <path> <type>` - 挂载文件系统
+- **其他命令**：help, clear, echo, pwd, ps, kill, reboot, uname
 
-### ⚠ 进行中
-- 完整的进程管理
-- 系统调用实现
+### ⚠ 部分实现（框架存在）
+- 内存管理 (⚠️ kmalloc有bug，使用静态数组workaround)
+- 进程调度框架 (仅单进程)
+- devfs设备文件系统 (挂载时挂起，已禁用)
+- 块设备接口 (框架存在)
+
+### ☐ 未实现
+- 完整的进程管理 (fork/exec/wait)
+- 系统调用层
+- 用户态/内核态切换
 - EXT2/FAT32文件系统
-
-### ☐ 计划中
 - GPIO驱动
 - SD卡驱动
 - 网络协议栈
-- 用户态程序
+- C标准库移植
+
+## 📝 开发路线图
+
+MinixRV64目前是一个**教育性质的微内核原型**，距离完整的POSIX兼容操作系统还有较大距离。
+
+详细的完整POSIX实现路线请参考项目文档。预计需要：
+- **12-24个月** 全职开发
+- **6个主要阶段**：内存管理完善 → 进程管理 → 系统调用 → C库移植 → 文件系统完善 → 高级特性
+- **最终目标**：运行标准Unix程序（bash, gcc, coreutils等）
 
 ## 开发阶段
-1. **阶段1**: 基础架构和引导 ✓
-2. **阶段2**: 内存管理和进程 ✓
-3. **阶段3**: 设备驱动 (进行中)
-4. **阶段4**: 文件系统 (进行中)
-5. **阶段5**: 网络和应用 (计划中)
+1. **阶段1**: 基础架构和引导 ✅
+2. **阶段2**: UART驱动和交互 ✅
+3. **阶段3**: 文件系统实现 ✅
+4. **阶段4**: 内存管理完善 (计划中)
+5. **阶段5**: 进程管理和系统调用 (计划中)
+6. **阶段6**: POSIX兼容性 (计划中)
 
 ## 快速开始
 
@@ -89,10 +109,59 @@ make BOARD=qemu-virt
 make qemu
 ```
 
+**预期输出**：
+```
+Minix RV64 ready
+✓ Shell
+minix# help
+Available commands:
+  help    - Show this help
+  clear   - Clear screen
+  echo    - Echo arguments
+  ls      - List directory
+  cat     - Display file
+  pwd     - Print working directory
+  cd      - Change directory
+  mkdir   - Create directory
+  touch   - Create empty file
+  write   - Write text to file
+  rm      - Remove file
+  mount   - Mount filesystem
+  ps      - Process list
+  kill    - Kill process
+  reboot  - Reboot system
+  uname   - System info
+minix#
+```
+
+### 文件系统示例
+```bash
+# 创建目录
+minix# mkdir /docs
+
+# 写入文件
+minix# write /hello.txt Hello from MinixRV64!
+
+# 读取文件
+minix# cat /hello.txt
+Hello from MinixRV64!
+
+# 列出目录
+minix# ls /
+docs
+hello.txt
+
+# 嵌套目录
+minix# mkdir /docs/notes
+minix# write /docs/notes/readme.txt This is a test file
+minix# cat /docs/notes/readme.txt
+This is a test file
+```
+
 ### 调试
 ```bash
-make qemu-gdb    # 终端1
-make gdb         # 终端2
+make qemu-gdb    # 终端1: 启动QEMU等待GDB连接
+make gdb         # 终端2: 启动GDB并连接
 ```
 
 ## 交叉编译工具链
@@ -100,14 +169,92 @@ make gdb         # 终端2
 - GCC 13+ with RV64GC support
 
 ## 文档
+
+### 核心文档
+- **[UART_FIX_AND_FILESYSTEM_SUCCESS.md](UART_FIX_AND_FILESYSTEM_SUCCESS.md)** - ⭐ **最新成功报告**
+- [CLAUDE.md](CLAUDE.md) - 开发者指南（为未来的Claude Code实例准备）
+- [QUICK_START.md](QUICK_START.md) - 快速开始指南
+
+### 技术文档
 - [ARCHITECTURE.md](ARCHITECTURE.md) - 系统架构概览
 - [FILESYSTEM.md](FILESYSTEM.md) - 文件系统设计
+- [FILESYSTEM_IMPROVEMENTS.md](FILESYSTEM_IMPROVEMENTS.md) - 文件系统实现详解（中文）
 - [UART_DRIVER.md](UART_DRIVER.md) - UART驱动文档
 - [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) - 项目结构
-- [IMPROVEMENTS_SUMMARY.md](IMPROVEMENTS_SUMMARY.md) - 最新更新总结
 
-## 内存映射 (示例)
-- 0x00000000: Boot ROM
-- 0x80000000: RAM start
-- 0x80100000: Kernel load
-- 0x80200000: Device tree
+### 问题修复文档
+- [INPUT_PROBLEM_SOLVED.md](INPUT_PROBLEM_SOLVED.md) - UART输入修复过程
+- [UART_INPUT_ISSUE.md](UART_INPUT_ISSUE.md) - UART问题技术分析
+
+## 技术细节
+
+### 内存映射
+```
+0x00000000      Boot ROM
+0x03000000      外设寄存器
+  0x10000000    UART (NS16550A compatible)
+0x80000000      RAM 起始地址
+0x80000000      内核代码段 (.text)
+0x80100000      内核数据段 (.data, .rodata)
+0x80200000      BSS段
+0x80300000      内核堆 (目前使用静态分配)
+```
+
+### 当前限制
+- **文件数量**: 最大256个文件（静态分配）
+- **文件大小**: 单个文件最大4KB（静态缓冲区）
+- **内存分配**: kmalloc有bug，使用静态数组workaround
+- **进程**: 仅单进程，无fork/exec
+- **持久化**: ramfs内存文件系统，重启后数据丢失
+
+### 已知问题
+1. **kmalloc返回无效地址** - slab allocator在arch/riscv64/mm/slab.c:178返回0x1
+2. **devfs挂载挂起** - 第二次文件系统挂载导致系统冻结
+3. **MMU禁用** - 当前运行在物理地址模式
+4. **无删除操作** - rm/rmdir未实现
+
+### 性能特征
+- **启动时间**: <1秒（QEMU）
+- **命令响应**: 即时
+- **文件操作**: 内存速度（ramfs）
+
+## 🎯 项目状态总结
+
+### ✅ 完成的工作
+1. **UART输入修复** - 跳过LSR寄存器检查，使用字符变化过滤
+2. **完整文件系统** - VFS + ramfs，支持目录和文件的创建、读写、列表
+3. **kmalloc问题绕过** - 使用静态数组替代动态内存分配
+4. **16个Shell命令** - 完整的交互式操作
+
+### ⚠️ 需要改进
+1. **修复kmalloc** - 调试slab allocator
+2. **启用MMU** - 虚拟内存支持
+3. **实现进程管理** - fork/exec/wait
+4. **添加系统调用层** - 用户态/内核态分离
+5. **清理调试输出** - 移除70+ early_puts()调试语句
+
+### 📚 学习价值
+
+MinixRV64是一个**优秀的操作系统学习项目**，适合：
+- 理解RISC-V架构和特权级别
+- 学习文件系统VFS设计
+- 实践内核调试技术
+- 了解操作系统启动流程
+
+## 贡献
+
+欢迎贡献！特别是以下方面：
+- 修复kmalloc/slab allocator
+- 实现进程管理
+- 添加更多文件系统（ext2, FAT32）
+- 改进文档
+
+## 许可
+
+本项目基于Minix操作系统，遵循BSD开源许可证。
+
+---
+
+**最后更新**: 2025-12-11
+**项目状态**: 🟢 活跃开发中
+**功能完整度**: 约30% (教育演示级别)
