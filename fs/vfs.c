@@ -483,20 +483,31 @@ ssize_t vfs_read(file_t *file, void *buf, size_t count)
 /* Write to file */
 ssize_t vfs_write(file_t *file, const void *buf, size_t count)
 {
+    early_puts("[vfs_write] Starting\n");
+
     if (file == NULL || file->inode == NULL) {
+        early_puts("[vfs_write] NULL file or inode\n");
         return -1;
     }
 
     if (file->inode->fs_private == NULL) {
+        early_puts("[vfs_write] NULL fs_private\n");
         return -1;
     }
 
+    early_puts("[vfs_write] Finding mount\n");
     mount_point_t *mnt = vfs_find_mount("");
     if (mnt == NULL || mnt->ops->write == NULL) {
+        early_puts("[vfs_write] No mount or write op\n");
         return -1;
     }
 
-    return mnt->ops->write(file, buf, count);
+    early_puts("[vfs_write] Calling ramfs_write\n");
+    ssize_t result = mnt->ops->write(file, buf, count);
+    early_puts("[vfs_write] Result: ");
+    early_puthex(result);
+    early_puts("\n");
+    return result;
 }
 
 /* Make directory */
