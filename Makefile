@@ -79,7 +79,9 @@ QEMU_SMP = 1
 QEMU_MEMORY = 128M
 QEMU_BIOS = none
 QEMU_SERIAL = stdio
-QEMU_EXTRA_ARGS = -device virtio-net-device,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
+# Network disabled until network stack is implemented
+# QEMU_EXTRA_ARGS = -device virtio-net-device,netdev=net0 -netdev user,id=net0,hostfwd=tcp::2222-:22
+QEMU_EXTRA_ARGS =
 
 .PHONY: all clean qemu qemu-debug qemu-gdb
 
